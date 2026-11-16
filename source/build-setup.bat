@@ -18,6 +18,6 @@ if exist setup\prism.ico set ICON=/win32icon:setup\prism.ico
   /r:"%WPF%\PresentationFramework.dll" /r:"%WPF%\PresentationCore.dll" /r:"%WPF%\WindowsBase.dll" ^
   /r:"%FW%\System.Xaml.dll" /r:System.dll /r:System.Core.dll /r:Microsoft.CSharp.dll ^
   /r:System.Windows.Forms.dll ^
-  setup\Setup.cs
+  setup\Setup.cs setup\AssemblyInfo.cs
 if errorlevel 1 (echo. & echo KURULUM DERLEMESI BASARISIZ & exit /b 1)
 echo Derlendi: bin\PrismDock-Setup.exe

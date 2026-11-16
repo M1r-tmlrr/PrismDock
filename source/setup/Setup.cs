@@ -29,6 +29,7 @@ namespace PrismDockSetup
             // copied as Uninstall.exe -> uninstall mode by default
             if (!un && Path.GetFileName(Assembly.GetExecutingAssembly().Location).Equals("Uninstall.exe", StringComparison.OrdinalIgnoreCase)) un = true;
 
+            Installer.CleanTemp();
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
             int si = Array.FindIndex(args, a => a.Equals("--snapshot", StringComparison.OrdinalIgnoreCase));
             if (si >= 0 && si + 1 < args.Length) { Snapshot(args[si + 1]); return 0; }
@@ -1080,19 +1081,29 @@ namespace PrismDockSetup
             Step(rep, 1.0, "Tamamlandı");
         }
 
-        /// Removes Uninstall.exe and the (then empty) install folder after this process exits.
-        /// Only our own files are deleted; rmdir without /s never removes foreign files.
+        /// Removes Uninstall.exe and the (then empty) install folder. A running exe cannot be deleted but it can be
+        /// moved: Uninstall.exe goes to %TEMP% (cleaned up on the next setup run), then the empty folder is removed.
+        /// Only our own files are touched; the folder is removed only when nothing else is left in it.
         public static void ScheduleSelfDelete(string dir)
         {
             try
             {
                 string self = Assembly.GetExecutingAssembly().Location;
-                string cmd = "/c ping 127.0.0.1 -n 3 > nul";
-                if (string.Equals(Path.GetDirectoryName(self), dir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
-                    cmd += " & del /f /q \"" + self + "\"";
-                cmd += " & rmdir \"" + dir.TrimEnd('\\') + "\"";
-                Process.Start(new ProcessStartInfo("cmd.exe", cmd) { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden });
+                dir = dir.TrimEnd('\\');
+                if (string.Equals(Path.GetDirectoryName(self), dir, StringComparison.OrdinalIgnoreCase))
+                {
+                    string tmp = Path.Combine(Path.GetTempPath(), "PrismDock-Uninstall-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".exe");
+                    try { File.Move(self, tmp); } catch { }
+                }
+                if (Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
             }
+            catch { }
+        }
+
+        /// leftovers of earlier uninstalls (see ScheduleSelfDelete)
+        public static void CleanTemp()
+        {
+            try { foreach (var f in Directory.GetFiles(Path.GetTempPath(), "PrismDock-Uninstall-*.exe")) DeleteFile(f); }
             catch { }
         }
 
