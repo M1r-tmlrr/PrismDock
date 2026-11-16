@@ -114,9 +114,7 @@ namespace PrismDock
             ListenForQuit();
 
             // one-time trim after startup: drops init-only pages from the working set
-            var trim = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
-            trim.Tick += (s, e) => { trim.Stop(); GC.Collect(); GC.WaitForPendingFinalizers(); Native.EmptyWorkingSet(System.Diagnostics.Process.GetCurrentProcess().Handle); };
-            trim.Start();
+            Memory.Start();
 
             app.Run();
         }

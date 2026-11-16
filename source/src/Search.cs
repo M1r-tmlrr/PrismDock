@@ -216,6 +216,7 @@ namespace PrismDock
     {
         public class Hit { public string Path, Name; public bool Folder; }
         static System.Data.OleDb.OleDbConnection cn;
+        static System.Threading.Timer idleClose;
         static bool indexBroken;
         static readonly object gate = new object();
 
@@ -245,6 +246,8 @@ namespace PrismDock
                     cn = new System.Data.OleDb.OleDbConnection("Provider=Search.CollatorDSO;Extended Properties='Application=Windows';");
                     cn.Open();
                 }
+                if (idleClose == null) idleClose = new System.Threading.Timer(_ => { lock (gate) { if (cn != null) { try { cn.Dispose(); } catch { } cn = null; } } });
+                idleClose.Change(30000, System.Threading.Timeout.Infinite);
                 var sb = new StringBuilder("SELECT TOP " + max + " System.ItemUrl, System.FileName, System.ItemType FROM SYSTEMINDEX WHERE SCOPE='file:'");
                 foreach (var w in words) sb.Append(" AND System.FileName LIKE '%" + Esc(w) + "%'");
                 sb.Append(" ORDER BY System.DateModified DESC");
@@ -311,6 +314,7 @@ namespace PrismDock
         TextBox box; TextBlock placeholder; StackPanel list; ScrollViewer scroll;
         readonly List<Result> results = new List<Result>();
         int sel = -1;
+        bool catalogHooked;
         int version;
         CancellationTokenSource cts;
         DispatcherTimer debounce;
@@ -358,7 +362,7 @@ namespace PrismDock
 
             debounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(130) };
             debounce.Tick += (s, e) => { debounce.Stop(); QueryFiles(); };
-            AppCatalog.Loaded += () => { if (IsOpen) OnText(); };
+            if (!catalogHooked) { catalogHooked = true; Action h = () => { if (IsOpen) OnText(); }; AppCatalog.Loaded += h; OnDestroy(() => AppCatalog.Loaded -= h); }
             OnText();
             return g;
         }
@@ -604,6 +608,7 @@ namespace PrismDock
         TextBox box; StackPanel list; TextBlock status;
         readonly Dictionary<AppEntry, Border> rows = new Dictionary<AppEntry, Border>();
 
+        bool catalogHooked;
         public AppPickerPanel() : base(400, 560) { }
 
         protected override UIElement Build()
@@ -640,7 +645,7 @@ namespace PrismDock
             Grid.SetRow(foot, 3); g.Children.Add(foot);
 
             rows.Clear();
-            AppCatalog.Loaded += () => { if (list != null) Fill(); };
+            if (!catalogHooked) { catalogHooked = true; Action h = () => { if (list != null) Fill(); }; AppCatalog.Loaded += h; OnDestroy(() => AppCatalog.Loaded -= h); }
             Fill();
             return g;
         }

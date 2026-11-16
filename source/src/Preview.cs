@@ -55,6 +55,8 @@ namespace PrismDock
         bool top, shown;
         public DockApp App { get; private set; }
         public bool IsShown { get { return shown; } }
+        DateTime hiddenAt = DateTime.MaxValue;
+        public bool Stale { get { return !shown && (DateTime.Now - hiddenAt).TotalSeconds > 120; } }
 
         public PreviewWindow()
         {
@@ -123,7 +125,7 @@ namespace PrismDock
             hideTimer.Stop();
             if (!shown) return;
             shown = false;
-            showS.OnSettle = () => { if (!shown) { Hide(); ClearCards(); if (host != null) host.Stop(); App = null; } };
+            showS.OnSettle = () => { if (!shown) { Hide(); ClearCards(); if (host != null) host.Stop(); App = null; hiddenAt = DateTime.Now; Memory.Soon(); } };
             showS.To(0, 600, 1);
         }
 

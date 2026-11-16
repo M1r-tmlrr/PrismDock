@@ -235,7 +235,12 @@ namespace PrismDock
     class TrayPanel : PanelWindow
     {
         StackPanel list; TextBlock count;
-        public TrayPanel() : base(400, 520) { Tray.Changed += () => { if (IsOpen) Fill(); }; }
+        public TrayPanel() : base(400, 520)
+        {
+            Action h = () => { if (IsOpen) Fill(); };
+            Tray.Changed += h;
+            OnDestroy(() => Tray.Changed -= h);
+        }
 
         protected override UIElement Build()
         {

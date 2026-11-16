@@ -69,6 +69,20 @@ namespace PrismDock
         }
 
         protected abstract UIElement Build();
+
+        /// static-event subscriptions made by a panel; removed when the panel is destroyed so it can be collected
+        readonly System.Collections.Generic.List<Action> unhook = new System.Collections.Generic.List<Action>();
+        protected void OnDestroy(Action a) { unhook.Add(a); }
+        protected override void OnClosed(EventArgs e)
+        {
+            foreach (var a in unhook) { try { a(); } catch { } }
+            unhook.Clear();
+            if (host != null) { host.Stop(); host.Clear(); }
+            base.OnClosed(e);
+        }
+
+        /// hidden long enough that keeping its window (and GPU surfaces) around isn't worth it
+        public bool Stale { get { return !IsOpen && ClosedAt != DateTime.MinValue && (DateTime.Now - ClosedAt).TotalSeconds > 120; } }
         protected virtual void Opened() { }
         protected virtual void Closed2() { }
 
@@ -165,7 +179,7 @@ namespace PrismDock
             if (!IsOpen) return;
             IsOpen = false; ClosedAt = DateTime.Now;
             Closed2();
-            prog.OnSettle = () => { if (!IsOpen) { Hide(); if (host != null) host.Stop(); } };
+            prog.OnSettle = () => { if (!IsOpen) { Hide(); if (host != null) host.Stop(); Memory.Soon(); } };
             prog.To(0, 500, 1.0);
         }
 
@@ -475,7 +489,12 @@ namespace PrismDock
     {
         System.Windows.Shapes.Path arc; TextBlock timeT; Border startB; TextBlock startT;
         const double R = 88;
-        public PomodoroPanel() : base(316, 400) { Pomodoro.Changed += () => { if (IsOpen) Sync(); }; }
+        public PomodoroPanel() : base(316, 400)
+        {
+            Action h = () => { if (IsOpen) Sync(); };
+            Pomodoro.Changed += h;
+            OnDestroy(() => Pomodoro.Changed -= h);
+        }
 
         protected override UIElement Build()
         {

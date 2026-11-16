@@ -56,7 +56,7 @@ namespace PrismDock
             refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(140) };
             refreshTimer.Tick += (s, e) => { refreshTimer.Stop(); Refresh(); };
             slowTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(15) };
-            slowTimer.Tick += (s, e) => { Refresh(); if (App.S.HideTaskbar) Taskbar.Enforce(); };
+            slowTimer.Tick += (s, e) => { Refresh(); if (App.S.HideTaskbar) Taskbar.Enforce(); ReapPanels(); };
             var enforce = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
             enforce.Tick += (s, e) => { if (App.S.HideTaskbar) Taskbar.Enforce(); };
             enforce.Start();
@@ -215,6 +215,23 @@ namespace PrismDock
             UpdateClock(); UpdateStats(); UpdatePomo(); UpdateMedia();
             UpdateStates();
             ApplyHotkey();
+        }
+
+        static T Reap<T>(T p) where T : PanelWindow
+        {
+            if (p == null || !p.Stale) return p;
+            p.Close();
+            return null;
+        }
+
+        /// panels that have stayed closed for 2 minutes are destroyed (window + GPU surfaces); they rebuild on demand
+        void ReapPanels()
+        {
+            int before = Panels.Count();
+            cal = Reap(cal); sys = Reap(sys); notes = Reap(notes); pomo = Reap(pomo); settingsP = Reap(settingsP);
+            search = Reap(search); picker = Reap(picker); startP = Reap(startP); trayP = Reap(trayP);
+            if (preview != null && preview.Stale) { preview.Close(); preview = null; before++; }
+            if (Panels.Count() != before) Memory.Soon();
         }
 
         public void RethemePanels() { foreach (var p in Panels) p.ApplyTheme(); }
@@ -791,7 +808,7 @@ namespace PrismDock
             foreach (var o in Panels) if (o.IsOpen) o.CloseAnimated();
             if (App.Island != null) App.Island.Nudge();
             foreach (var a in apps) if (a.View != null) a.View.SetMagnify(1);
-            entrance.OnSettle = () => { if (autoHidden) { Native.ShowWindow(hwnd, Native.SW_HIDE); statTimer.Stop(); if (host != null) host.Stop(); Tray.Pause(true); } };
+            entrance.OnSettle = () => { if (autoHidden) { Native.ShowWindow(hwnd, Native.SW_HIDE); statTimer.Stop(); if (host != null) host.Stop(); Tray.Pause(true); Memory.Soon(); } };
             entrance.To((App.S.Top ? -1 : 1) * (winH + 6), 140, 0.9);
         }
 
