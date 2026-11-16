@@ -1,0 +1,42 @@
+# ---- build output (rebuild with build.bat / build-setup.bat) ----
+bin/
+obj/
+*.exe
+# ...except the two downloadable builds at the repository root
+!/PrismDock.exe
+!/PrismDock-Setup.exe
+*.dll
+*.pdb
+
+# ---- personal / local data: never commit ----
+yedek/
+.env
+.env.*
+*.env
+settings.ini
+notes.txt
+*.log
+*.ps
+secrets*
+*.secret
+*.key
+*.pem
+*.pfx
+*.p12
+*.snk
+*.cer
+
+# ---- archives / downloads ----
+*.zip
+*.7z
+*.rar
+
+# ---- editor / OS clutter ----
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.DS_Store
