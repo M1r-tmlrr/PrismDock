@@ -19,6 +19,8 @@ namespace PrismDock
         [STAThread]
         static void Main(string[] args)
         {
+            // multi-core JIT: the first run records what gets compiled at startup, later runs compile it in parallel
+            try { System.Runtime.ProfileOptimization.SetProfileRoot(Settings.Dir); System.Runtime.ProfileOptimization.StartProfile("startup.jit"); } catch { }
             S = Settings.Load();
             if (args.Any(a => a.Equals("--quit", StringComparison.OrdinalIgnoreCase)))
             {
@@ -75,7 +77,7 @@ namespace PrismDock
             bool created;
             mutex = new Mutex(true, "PrismDock_SingleInstance_v1", out created);
             if (!created) return;
-            S.AutoStart = AutoStartRegistered();
+            S.AutoStart = S.AutoStart || AutoStart.RunKeyExists();   // exact state is checked in the background below
 
             var startClock = System.Diagnostics.Stopwatch.StartNew();
             Theme.Cur = Theme.Get(S.Theme);
@@ -97,7 +99,15 @@ namespace PrismDock
             Dock = new DockWindow();
             Dock.Show();
             if (S.HideTaskbar) Taskbar.HideHard(S);   // off the UI thread, after the dock is on screen
-            EventLog.Write("start  build " + EventLog.WindowsBuild + "  dock shown in " + startClock.ElapsedMilliseconds + " ms");
+            EventLog.Write("start  build " + EventLog.WindowsBuild + "  dock shown in " + startClock.ElapsedMilliseconds + " ms" +
+                "  (" + (int)(DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime).TotalMilliseconds + " ms since process start, uptime " + (Native.GetTickCount64() / 1000) + " s)");
+            string selfExe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                bool on = AutoStart.Migrate(selfExe);
+                autoApplied = on;
+                Dock.Dispatcher.BeginInvoke(new Action(() => { if (S.AutoStart != on) { S.AutoStart = on; S.Save(); } }));
+            });
             SyncIsland();
             SetupTray();
             ListenForQuit();
@@ -137,15 +147,6 @@ namespace PrismDock
             catch { }
         }
 
-        static bool AutoStartRegistered()
-        {
-            try
-            {
-                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run"))
-                    return k != null && k.GetValue("PrismDock") != null;
-            }
-            catch { return false; }
-        }
 
         static void SyncIsland()
         {
@@ -174,25 +175,13 @@ namespace PrismDock
             if (!S.Island || !S.AutoHide) Dock.ShowDock();
         }
 
+        static bool? autoApplied;
         static void SetAutoStart(bool on)
         {
-            if (on == AutoStartRegistered()) return;
-            SetAutoStartCore(on);
-        }
-
-        static void SetAutoStartCore(bool on)
-        {
-            try
-            {
-                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true))
-                {
-                    if (k == null) return;
-                    string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
-                    if (on) k.SetValue("PrismDock", "\"" + exe + "\"");
-                    else if (k.GetValue("PrismDock") != null) k.DeleteValue("PrismDock");
-                }
-            }
-            catch { }
+            if (autoApplied == on) return;
+            autoApplied = on;
+            string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ => AutoStart.Set(on, exe));
         }
 
         static void SetupTray()

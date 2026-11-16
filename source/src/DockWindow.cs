@@ -125,6 +125,24 @@ namespace PrismDock
                 else if (open == "calendar") { var c = cal ?? (cal = new CalendarPanel()); c.OpenAt(SystemParameters.PrimaryScreenWidth - 200, Edge, App.S.Top); }
                 if (Environment.GetEnvironmentVariable("PRISM_BENCH") != null) Bench();
                 if (Environment.GetEnvironmentVariable("PRISM_DRAGTEST") != null) DragTest();
+                if (Environment.GetEnvironmentVariable("PRISM_PREVIEWTEST") != null)
+                {
+                    // dev: open the preview of the app with the most windows for 4 s (no input)
+                    ShowDock();
+                    var t0 = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
+                    t0.Tick += (o, e3) =>
+                    {
+                        t0.Stop();
+                        var v = DockIcons().OrderByDescending(i => i.App.Wins.Count).FirstOrDefault();
+                        if (v == null || v.App.Wins.Count == 0) return;
+                        ShowPreview(v);
+                        EventLog.Write("previewtest: " + v.App.Name + " x" + v.App.Wins.Count);
+                        var t1 = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+                        t1.Tick += (o2, e4) => { t1.Stop(); HidePreview(); };
+                        t1.Start();
+                    };
+                    t0.Start();
+                }
                 if (open != null && open.StartsWith("search:")) { OpenSearch(); search.DebugQuery(open.Substring(7)); }
             };
             warm.Start();
@@ -714,7 +732,7 @@ namespace PrismDock
         void AutoHideTick()
         {
             if (!(AutoHiding || hiddenFs) || autoHidden) { autoTimer.Stop(); return; }
-            bool busy = IsMouseOver || Panels.Any(p => p.IsOpen);
+            bool busy = IsMouseOver || Panels.Any(p => p.IsOpen) || (preview != null && preview.IsShown);
             if (busy) { RestartAutoHide(); return; }
             HideDock();
         }
@@ -742,6 +760,7 @@ namespace PrismDock
             if (autoHidden) return;
             autoHidden = true;
             autoTimer.Stop();
+            HidePreview();
             foreach (var o in Panels) if (o.IsOpen) o.CloseAnimated();
             if (App.Island != null) App.Island.Nudge();
             foreach (var a in apps) if (a.View != null) a.View.SetMagnify(1);
@@ -772,6 +791,9 @@ namespace PrismDock
             var v = new DockIcon(a, S, pillH, host);
             a.View = v;
             v.MouseLeftButtonUp += (s, e) => { if (v.IsMouseOver && (DateTime.Now - dragEnded).TotalMilliseconds > 250) OnAppClick(a); };
+            v.MouseEnter += (s, e) => HoverIcon(v);
+            v.MouseLeave += (s, e) => LeaveIcon(v);
+            v.PreviewMouseDown += (s, e) => HidePreview();
             v.PreviewMouseLeftButtonDown += (s, e) => { dragV = v; dragging = false; dragStart = e.GetPosition(appsPanel); };
             v.PreviewMouseMove += (s, e) =>
             {
@@ -838,9 +860,54 @@ namespace PrismDock
         static double SlotX(UIElement el) { return VisualTreeHelper.GetOffset(el).X; }
         IEnumerable<DockIcon> DockIcons() { return appsPanel.Children.OfType<DockIcon>(); }
 
+        // ---------------------------------------------------------------- window previews
+        PreviewWindow preview;
+        DispatcherTimer hoverTimer;
+        DockIcon hoverIcon;
+
+        void HoverIcon(DockIcon v)
+        {
+            if (dragging) return;
+            hoverIcon = v;
+            if (hoverTimer == null)
+            {
+                hoverTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+                hoverTimer.Tick += (s, e) => { hoverTimer.Stop(); if (hoverIcon != null && hoverIcon.IsMouseOver) ShowPreview(hoverIcon); };
+            }
+            hoverTimer.Stop();
+            if (preview != null && preview.IsShown) ShowPreview(v);   // already open: follow the pointer instantly
+            else hoverTimer.Start();
+        }
+
+        void LeaveIcon(DockIcon v)
+        {
+            if (hoverIcon == v) hoverIcon = null;
+            if (hoverTimer != null) hoverTimer.Stop();
+            if (preview != null) preview.HideSoon();
+        }
+
+        void ShowPreview(DockIcon v)
+        {
+            if (dragging || v.App.Removing) return;
+            if (v.App.Wins.Count == 0) { if (preview != null) preview.HideSoon(); return; }
+            if (preview == null) preview = new PreviewWindow();
+            Point pt;
+            try { pt = v.PointToScreen(new Point(v.ActualWidth / 2, 0)); } catch { return; }
+            double edge = App.S.Top ? Top + margin + pillH : Top + margin;
+            preview.ShowFor(v.App, pt.X / scale, edge, App.S.Top);
+            RestartAutoHide();
+        }
+
+        void HidePreview()
+        {
+            if (hoverTimer != null) hoverTimer.Stop();
+            if (preview != null) preview.HideNow();
+        }
+
         void BeginDrag(Point p)
         {
             dragging = true; dragMoved = false;
+            HidePreview();
             grabOffset = dragStart.X - SlotX(dragV);
             foreach (var i in DockIcons()) if (i != dragV) i.SetMagnify(1);
             dragV.SetDragging(true);
@@ -969,6 +1036,7 @@ namespace PrismDock
 
         void AppMenu(DockApp a)
         {
+            HidePreview();
             var m = Ui.Menu();
             foreach (var w in a.Wins.Take(10))
             {

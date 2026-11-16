@@ -20,7 +20,7 @@ namespace PrismDockSetup
 {
     static class Program
     {
-        public const string Version = "2.1.1";
+        public const string Version = "2.1.2";
 
         [STAThread]
         static int Main(string[] args)
@@ -1015,12 +1015,41 @@ namespace PrismDockSetup
             }
 
             Step(rep, 0.9, "Başlangıç ayarlanıyor…");
+            // start at sign-in through a logon task (immediate); the Run key would wait behind every other startup app
             using (var k = Registry.CurrentUser.CreateSubKey(RunKey))
             {
-                if (o.AutoStart) k.SetValue("PrismDock", "\"" + exe + "\"");
+                bool task = o.AutoStart && LogonTask(exe);
+                if (o.AutoStart && !task) k.SetValue("PrismDock", "\"" + exe + "\"");   // fallback
                 else if (k.GetValue("PrismDock") != null) k.DeleteValue("PrismDock");
+                if (!o.AutoStart) Schtasks("/delete /tn \"PrismDock\" /f");
             }
             Step(rep, 1.0, "Tamamlandı");
+        }
+
+        static int Schtasks(string args)
+        {
+            try
+            {
+                using (var p = Process.Start(new ProcessStartInfo("schtasks.exe", args) { CreateNoWindow = true, UseShellExecute = false }))
+                { p.WaitForExit(10000); return p.ExitCode; }
+            }
+            catch { return -1; }
+        }
+
+        static bool LogonTask(string exe)
+        {
+            string user = Environment.UserDomainName + "\\" + Environment.UserName;
+            string xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">" +
+                "<RegistrationInfo><Description>PrismDock</Description></RegistrationInfo>" +
+                "<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + System.Security.SecurityElement.Escape(user) + "</UserId></LogonTrigger></Triggers>" +
+                "<Principals><Principal id=\"Author\"><UserId>" + System.Security.SecurityElement.Escape(user) + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>" +
+                "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" +
+                "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>4</Priority></Settings>" +
+                "<Actions Context=\"Author\"><Exec><Command>\"" + System.Security.SecurityElement.Escape(exe) + "\"</Command><WorkingDirectory>" + System.Security.SecurityElement.Escape(Path.GetDirectoryName(exe)) + "</WorkingDirectory></Exec></Actions></Task>";
+            string f = Path.Combine(Path.GetTempPath(), "prismdock-task.xml");
+            try { File.WriteAllText(f, xml, System.Text.Encoding.Unicode); return Schtasks("/create /tn \"PrismDock\" /xml \"" + f + "\" /f") == 0; }
+            catch { return false; }
+            finally { try { File.Delete(f); } catch { } }
         }
 
         public static void Uninstall(Options o, Action<double, string> rep)
@@ -1035,6 +1064,7 @@ namespace PrismDockSetup
             Step(rep, 0.52, "Kayıt bilgileri temizleniyor…");
             using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
                 if (k != null && k.GetValue("PrismDock") != null) k.DeleteValue("PrismDock");
+            Schtasks("/delete /tn \"PrismDock\" /f");
             try { Registry.CurrentUser.DeleteSubKeyTree(UninstKey, false); } catch { }
 
             if (o.Wipe)

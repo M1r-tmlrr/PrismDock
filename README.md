@@ -19,6 +19,7 @@ Gereksinim: Windows 10 veya Windows 11, .NET Framework 4.8.
 - Arama (Alt + Boşluk): uygulama, dosya, klasör, hesap makinesi
 - Sistem tepsisi ve arka planda çalışan uygulamalar (Windows 10)
 - Çalan şarkı / video bilgisi
+- Simgenin üzerine gelince pencerelerin canlı önizlemesi (tıkla geç, ✕ ile kapat)
 - Simgeleri sürükleyerek sıralama
 - Tam ekranda otomatik gizlenme
 
