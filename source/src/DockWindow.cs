@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -37,9 +37,10 @@ namespace PrismDock
         Int32Rect lastRgn = new Int32Rect(-1, -1, -1, -1);
         const int HotkeyId = 0x5D01;
 
-        CalendarPanel cal; SystemPanel sys; NotesPanel notes; PomodoroPanel pomo; SettingsPanel settingsP; SearchWindow search; AppPickerPanel picker; StartPanel startP; TrayPanel trayP;
+        CalendarPanel cal; SystemPanel sys; NotesPanel notes; PomodoroPanel pomo; SettingsPanel settingsP; SearchWindow search; AppPickerPanel picker; StartPanel startP; TrayPanel trayP; KeyboardPanel kbdP;
+        TextBlock kbdText; ScaleTransform kbdSc; Spring kbdS;
         StackPanel trayInline;
-        IEnumerable<PanelWindow> Panels { get { return new PanelWindow[] { cal, sys, notes, pomo, settingsP, search, picker, startP, trayP }.Where(p => p != null); } }
+        IEnumerable<PanelWindow> Panels { get { return new PanelWindow[] { cal, sys, notes, pomo, settingsP, search, picker, startP, trayP, kbdP }.Where(p => p != null); } }
 
         public DockWindow()
         {
@@ -77,6 +78,7 @@ namespace PrismDock
             Pomodoro.Changed += UpdatePomo;
             Pomodoro.Finished += () => { if (pomoWidget != null) Pulse(pomoWidget); };
             Media.Changed += UpdateMedia;
+            KeyLayout.Changed += UpdateKbd;
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => Dispatcher.BeginInvoke(new Action(() => { Layout(); }), DispatcherPriority.Background);
 
             LoadPins();
@@ -104,6 +106,7 @@ namespace PrismDock
             Refresh();
             slowTimer.Start();
             UpdateClock(); UpdateStats(); statTimer.Start();
+            KeyLayout.Start(Dispatcher);
             ApplyHotkey();
             Tray.Changed += FillTray;
             var later = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
@@ -122,6 +125,7 @@ namespace PrismDock
                 if (open == "search") OpenSearch();
                 else if (open == "picker") OpenAppPicker();
                 else if (open == "settings") OpenSettings();
+                else if (open == "keyboard") { var k = kbdP ?? (kbdP = new KeyboardPanel()); k.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top); }
                 else if (open == "calendar") { var c = cal ?? (cal = new CalendarPanel()); c.OpenAt(SystemParameters.PrimaryScreenWidth - 200, Edge, App.S.Top); }
                 if (Environment.GetEnvironmentVariable("PRISM_BENCH") != null) Bench();
                 if (Environment.GetEnvironmentVariable("PRISM_DRAGTEST") != null) DragTest();
@@ -530,6 +534,19 @@ namespace PrismDock
             pomoWidget = pb;
             p.Children.Add(pb);
 
+            // keyboard layout: "TR Q" badge, opens the keyboard panel
+            var kp = new StackPanel { Orientation = Orientation.Horizontal };
+            kp.Children.Add(Ui.Glyph("", Math.Round(S * 0.36), fg));
+            kbdText = Ui.Text("", 11, FontWeights.SemiBold, fg); kbdText.Margin = new Thickness(5, 0, 0, 0);
+            kbdSc = new ScaleTransform(1, 1); kbdText.RenderTransform = kbdSc; kbdText.RenderTransformOrigin = new Point(0.5, 0.5);
+            kp.Children.Add(kbdText);
+            kbdS = new Spring(1, v => kbdSc.ScaleY = v, 420, 0.55);
+            FrameworkElement kbb = null;
+            kbb = Ui.Button(kp, () => TogglePanel(kbdP ?? (kbdP = new KeyboardPanel()), kbb), "Klavye düzeni", 0, S * 0.82, S * 0.41);
+            ((Border)kbb).Padding = new Thickness(8, 0, 8, 0);
+            p.Children.Add(kbb);
+            UpdateKbd(false);
+
             FrameworkElement nb = null;
             nb = GlyphBtn("", () => TogglePanel(notes ?? (notes = new NotesPanel()), nb), "Notlar");
             p.Children.Add(nb);
@@ -674,6 +691,16 @@ namespace PrismDock
                 bool ch; int b = SysStats.Battery(out ch);
                 batText.Text = b + "%" + (ch ? "⚡" : "");
             }
+        }
+
+        void UpdateKbd() { UpdateKbd(true); }
+        void UpdateKbd(bool animate)
+        {
+            if (kbdText == null || KeyLayout.Current == IntPtr.Zero) return;
+            string txt = KeyLayout.Short(KeyLayout.Id(KeyLayout.Current));
+            if (kbdText.Text == txt) return;
+            kbdText.Text = txt;
+            if (animate) { kbdS.Snap(0.1); kbdS.To(1); }
         }
 
         void UpdatePomo()

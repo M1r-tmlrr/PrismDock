@@ -70,6 +70,7 @@ namespace PrismDock
                     new PomodoroPanel().Snapshot(Path.Combine(dir, th.Id + "_pomodoro.png"));
                     new SettingsPanel().Snapshot(Path.Combine(dir, th.Id + "_settings.png"));
                     new NotesPanel().Snapshot(Path.Combine(dir, th.Id + "_notes.png"));
+                    new KeyboardPanel().Snapshot(Path.Combine(dir, th.Id + "_keyboard.png"));
                 }
                 return;
             }

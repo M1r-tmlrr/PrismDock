@@ -20,6 +20,7 @@ Gereksinim: Windows 10 veya Windows 11, .NET Framework 4.8.
 - Sistem tepsisi ve arka planda çalışan uygulamalar (Windows 10)
 - Çalan şarkı / video bilgisi
 - Simgenin üzerine gelince pencerelerin canlı önizlemesi (tıkla geç, ✕ ile kapat)
+- Klavye paneli: tek tıkla Türkçe Q / Türkçe F'ye geçiş, dock'ta etkin düzen rozeti
 - Simgeleri sürükleyerek sıralama
 - Tam ekranda otomatik gizlenme
 
