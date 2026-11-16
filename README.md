@@ -8,9 +8,8 @@ Windows için cam görünümlü dock ve görev çubuğu. Windows 10 ve Windows 1
 - [PrismDock.exe](https://github.com/M1r-tmlrr/PrismDock/releases/latest/download/PrismDock.exe): kurulumsuz
 - [Kaynak kod](source)
 
-Gereksinim: Windows 10 (1903+) veya Windows 11, .NET Framework 4.8.
+Gereksinim: Windows 10 veya Windows 11, .NET Framework 4.8.
 
-Windows "bilgisayarınızı korudu" uyarısı verirse: **Ek bilgi → Yine de çalıştır**.
 
 ## Özellikler
 
