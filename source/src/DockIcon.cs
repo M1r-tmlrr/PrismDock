@@ -135,7 +135,8 @@ namespace PrismDock
 
             glowBrush = new SolidColorBrush(t.Dark ? Color.FromArgb(50, 255, 255, 255) : Color.FromArgb(40, 0, 0, 0));
             glow = new Border { CornerRadius = new CornerRadius(r), Background = glowBrush, Opacity = 0 };
-            img = new System.Windows.Controls.Image { Source = app.Icon(), Width = Math.Round(iconSize * 0.66), Height = Math.Round(iconSize * 0.66) };
+            img = new System.Windows.Controls.Image { Width = Math.Round(iconSize * 0.66), Height = Math.Round(iconSize * 0.66) };
+            Dispatcher.BeginInvoke(new Action(() => img.Source = app.Icon()), System.Windows.Threading.DispatcherPriority.Background);
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
 
             holder.Children.Add(shade);

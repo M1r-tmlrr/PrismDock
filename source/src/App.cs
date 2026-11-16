@@ -77,13 +77,13 @@ namespace PrismDock
             if (!created) return;
             S.AutoStart = AutoStartRegistered();
 
+            var startClock = System.Diagnostics.Stopwatch.StartNew();
             Theme.Cur = Theme.Get(S.Theme);
-            Wallpaper.Load();
             InitPins();
             Microsoft.Win32.SystemEvents.UserPreferenceChanged += (s, e) =>
             {
                 if (e.Category != Microsoft.Win32.UserPreferenceCategory.Desktop || Dock == null) return;
-                Dock.Dispatcher.BeginInvoke(new Action(() => { Wallpaper.Load(); Dock.Rebuild(); Dock.RethemePanels(); }));
+                Dock.Dispatcher.BeginInvoke(new Action(() => { if (!S.LiveGlass) Wallpaper.Load(); Dock.Rebuild(); Dock.RethemePanels(); }));
             };
 
             var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -92,11 +92,12 @@ namespace PrismDock
             app.DispatcherUnhandledException += (s, e) => { Log(e.Exception); e.Handled = true; };
             app.SessionEnding += (s, e) => { sessionEnding = true; Cleanup(); };
 
-            if (S.HideTaskbar) Taskbar.Hide(S);
-            else if (S.TaskbarTouched) Taskbar.Restore(S);
+            if (!S.HideTaskbar && S.TaskbarTouched) Taskbar.Restore(S);
 
             Dock = new DockWindow();
             Dock.Show();
+            if (S.HideTaskbar) Taskbar.HideHard(S);   // off the UI thread, after the dock is on screen
+            EventLog.Write("start  build " + EventLog.WindowsBuild + "  dock shown in " + startClock.ElapsedMilliseconds + " ms");
             SyncIsland();
             SetupTray();
             ListenForQuit();
@@ -165,7 +166,7 @@ namespace PrismDock
             lastTheme = S.Theme;
             Theme.Cur = Theme.Get(S.Theme);
             SetAutoStart(S.AutoStart);
-            if (S.HideTaskbar) Taskbar.Hide(S); else Taskbar.Restore(S);
+            if (S.HideTaskbar) Taskbar.HideHard(S); else Taskbar.Restore(S);
             Dock.Rebuild();
             if (themeChanged) Dock.RethemePanels();
             SyncIsland();

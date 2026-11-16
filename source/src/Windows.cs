@@ -88,6 +88,13 @@ namespace PrismDock
             return exe;
         }
 
+        static string ExeName(uint pid)
+        {
+            string exe;
+            if (!pidCache.TryGetValue(pid, out exe)) { exe = Native.GetProcessPath(pid); pidCache[pid] = exe; }
+            return exe != null ? Path.GetFileName(exe) : null;
+        }
+
         public static void Activate(IntPtr h)
         {
             if (Native.IsIconic(h)) Native.ShowWindow(h, Native.SW_RESTORE);
@@ -117,13 +124,33 @@ namespace PrismDock
             return n;
         }
 
+        // shell surfaces that can be screen-sized but are never "a fullscreen app" (Windows 11 uses several)
+        static readonly HashSet<string> ShellClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "NotifyIconOverflowWindow",
+            "Windows.UI.Core.CoreWindow", "XamlExplorerHostIslandWindow", "XamlExplorerHostIslandWindow_WASDK",
+            "TopLevelWindowForOverflowXamlIsland", "ForegroundStaging", "MultitaskingViewFrame", "TaskSwitcherWnd",
+            "Shell_InputSwitchTopLevelWindow", "LockScreenBackstopFrame", "ControlCenterWindow"
+        };
+        static readonly HashSet<string> ShellProcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "explorer.exe", "ShellExperienceHost.exe", "StartMenuExperienceHost.exe", "SearchHost.exe", "SearchApp.exe",
+            "SearchUI.exe", "TextInputHost.exe", "LockApp.exe", "ShellHost.exe", "Widgets.exe", "PhoneExperienceHost.exe"
+        };
+
         public static bool IsFullscreen(IntPtr h)
         {
-            if (h == IntPtr.Zero) return false;
+            if (h == IntPtr.Zero || !Native.IsWindowVisible(h) || Native.IsIconic(h)) return false;
             string cls = Native.GetClass(h);
-            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd") return false;
+            if (ShellClasses.Contains(cls)) return false;
             uint pid; Native.GetWindowThreadProcessId(h, out pid);
             if (pid == OwnPid) return false;
+            int ex = Native.GetWindowLong(h, Native.GWL_EXSTYLE);
+            if ((ex & (0x20 /*TRANSPARENT*/ | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW)) != 0) return false;
+            int cloaked;
+            if (Native.DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return false;
+            string exe = ExeName(pid);
+            if (exe != null && ShellProcs.Contains(exe)) return false;
             // a maximised window also covers the whole screen when the taskbar is hidden: that's not fullscreen
             // (a real fullscreen video / game drops the caption; a maximised window keeps it)
             if (Native.IsZoomed(h) && (Native.GetWindowLong(h, -16) & 0x00C00000) == 0x00C00000) return false;

@@ -20,7 +20,7 @@ namespace PrismDockSetup
 {
     static class Program
     {
-        public const string Version = "2.1.0";
+        public const string Version = "2.1.1";
 
         [STAThread]
         static int Main(string[] args)
@@ -390,7 +390,7 @@ namespace PrismDockSetup
             side.Child = sp;
             body.Children.Add(side);
 
-            var foot = G.Text("Liquid glass dock · Windows 10", 10.5, FontWeights.Normal, G.Dim);
+            var foot = G.Text("Liquid glass dock · Windows 10 / 11", 10.5, FontWeights.Normal, G.Dim);
             foot.VerticalAlignment = VerticalAlignment.Bottom; foot.Margin = new Thickness(28, 0, 0, 24);
             body.Children.Add(foot);
 
@@ -572,10 +572,7 @@ namespace PrismDockSetup
             sp.Children.Add(Feature("\uE790", "Liquid Glass görünüm", "Canlı cam efekti, 8 tema, akıcı yay animasyonları", G.Teal));
             sp.Children.Add(Feature("\uE71D", "Uygulamalar ve pencereler", "Sabitlenen uygulamalar, gruplanan açık pencereler", Color.FromRgb(140, 180, 255)));
             sp.Children.Add(Feature("\uE8D6", "Widget'lar", "Medya, dosya arama, sistem, takvim, notlar, odak zamanlayıcı", Color.FromRgb(196, 150, 255)));
-            if (IsWindows11)
-                sp.Children.Add(Feature("\uE7BA", "Windows 11 henüz desteklenmiyor", "Bu sürüm Windows 10 için. Windows 11'de sistem tepsisi ve görev çubuğu gizleme düzgün çalışmayabilir.", Color.FromRgb(255, 190, 90)));
-            else
-                sp.Children.Add(Feature("\uE945", "Hafif", "Düşük bellek ve boştayken neredeyse sıfır işlemci", Color.FromRgb(255, 170, 210)));
+            sp.Children.Add(Feature("\uE945", "Hafif", "Düşük bellek ve boştayken neredeyse sıfır işlemci", Color.FromRgb(255, 170, 210)));
             return sp;
         }
 

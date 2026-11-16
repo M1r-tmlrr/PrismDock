@@ -8,6 +8,7 @@ namespace PrismDock
         const uint ABM_NEW = 0, ABM_REMOVE = 1, ABM_QUERYPOS = 2, ABM_SETPOS = 3, ABM_GETSTATE = 4, ABM_SETSTATE = 10;
         const int ABS_AUTOHIDE = 1, ABS_ALWAYSONTOP = 2;
         static readonly System.Collections.Generic.HashSet<IntPtr> appbars = new System.Collections.Generic.HashSet<IntPtr>();
+        static readonly System.Collections.Generic.Dictionary<IntPtr, string> lastPos = new System.Collections.Generic.Dictionary<IntPtr, string>();
         public static uint CallbackMsg = Native.RegisterWindowMessage("PrismDockAppBar");
 
         static IntPtr Tray { get { return Native.FindWindow("Shell_TrayWnd", null); } }
@@ -46,7 +47,32 @@ namespace PrismDock
         /// Re-hides if explorer brought it back. Cheap check.
         public static void Enforce()
         {
-            ForEachTray(h => { if (Native.IsWindowVisible(h)) Native.ShowWindow(h, Native.SW_HIDE); });
+            ForEachTray(h => { if (Native.IsWindowVisible(h)) { Native.ShowWindow(h, Native.SW_HIDE); EventLog.Write("taskbar re-hidden"); } });
+        }
+
+        /// Windows 11's explorer re-shows the taskbar shortly after its auto-hide state changes:
+        /// hide, then keep re-hiding for a few seconds. Runs on a worker thread (explorer can be slow at login).
+        public static void HideHard(Settings s)
+        {
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    for (int i = 0; i < 40 && Tray == IntPtr.Zero; i++) System.Threading.Thread.Sleep(250); // explorer still starting
+                    Hide(s);
+                    EventLog.Write("taskbar hidden (" + sw.ElapsedMilliseconds + " ms)");
+                    for (int i = 0; i < 60; i++) { System.Threading.Thread.Sleep(100); if (s.HideTaskbar) Enforce(); }
+                }
+                catch { }
+            });
+        }
+
+        public static bool IsTray(IntPtr h)
+        {
+            if (h == IntPtr.Zero) return false;
+            string c = Native.GetClass(h);
+            return c == "Shell_TrayWnd" || c == "Shell_SecondaryTrayWnd";
         }
 
         public static void Restore(Settings s)
@@ -69,6 +95,11 @@ namespace PrismDock
                 appbars.Add(hwnd);
             }
             int sw = Native.GetSystemMetrics(0), sh = Native.GetSystemMetrics(1);
+            // same strip as last time: nothing to negotiate (avoids appbar ping-pong between our two bars)
+            string key = top + ":" + heightPx + ":" + sw + "x" + sh;
+            string prev;
+            if (lastPos.TryGetValue(hwnd, out prev) && prev == key) return;
+            lastPos[hwnd] = key;
             d.uEdge = top ? 1u : 3u;
             d.rc.Left = 0; d.rc.Right = sw;
             if (top) { d.rc.Top = 0; d.rc.Bottom = heightPx; } else { d.rc.Top = sh - heightPx; d.rc.Bottom = sh; }
@@ -83,6 +114,7 @@ namespace PrismDock
             var d = new Native.APPBARDATA(); d.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(d); d.hWnd = hwnd;
             Native.SHAppBarMessage(ABM_REMOVE, ref d);
             appbars.Remove(hwnd);
+            lastPos.Remove(hwnd);
         }
     }
 }

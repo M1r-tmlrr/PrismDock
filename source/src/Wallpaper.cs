@@ -11,10 +11,14 @@ namespace PrismDock
     /// Costs ~1 MB RAM and zero CPU while idle.
     static class Wallpaper
     {
-        public static BitmapSource Blurred;
+        static BitmapSource blurred;
+        static bool loaded;
+        /// decoded lazily: with live glass on, the wallpaper is never needed (saves startup time)
+        public static BitmapSource Blurred { get { if (!loaded) Load(); return blurred; } private set { blurred = value; } }
 
         public static void Load()
         {
+            loaded = true;
             Blurred = null;
             try
             {

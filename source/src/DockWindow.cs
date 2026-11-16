@@ -27,7 +27,7 @@ namespace PrismDock
         bool built, hiddenFs;
         DispatcherTimer refreshTimer, slowTimer, clockTimer, statTimer;
         uint shellMsg, taskbarCreatedMsg;
-        Native.WinEventProc winProc; IntPtr hookFg, hookMin;
+        Native.WinEventProc winProc; IntPtr hookFg, hookMin, hookShow;
         DispatcherTimer fsCheck;
         TextBlock clockTime, clockDate, pomoText, batText, playGlyph, mediaTitle, mediaArtist; Border cpuFill, ramFill, mediaThumb; FrameworkElement batWidget, pomoWidget, mediaInfo;
         int statTicks;
@@ -56,6 +56,9 @@ namespace PrismDock
             refreshTimer.Tick += (s, e) => { refreshTimer.Stop(); Refresh(); };
             slowTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(15) };
             slowTimer.Tick += (s, e) => { Refresh(); if (App.S.HideTaskbar) Taskbar.Enforce(); };
+            var enforce = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+            enforce.Tick += (s, e) => { if (App.S.HideTaskbar) Taskbar.Enforce(); };
+            enforce.Start();
             clockTimer = new DispatcherTimer();
             clockTimer.Tick += (s, e) => UpdateClock();
             statTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(3) };
@@ -102,12 +105,14 @@ namespace PrismDock
             slowTimer.Start();
             UpdateClock(); UpdateStats(); statTimer.Start();
             ApplyHotkey();
-            Media.Init(Dispatcher);
             Tray.Changed += FillTray;
-            Tray.Start(Dispatcher);
+            var later = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
+            later.Tick += (s2, e2) => { later.Stop(); Media.Init(Dispatcher); Tray.Start(Dispatcher); };
+            later.Start();
+            // explorer re-showing its taskbar (Windows 11 does this) is caught the moment it happens
+            HookExplorerShow();
             Entrance();
             WatchForeground(Native.GetForegroundWindow());
-            SetFullscreen(Tracker.IsFullscreen(Native.GetForegroundWindow()));
             // warm the app catalog for search / picker in the background
             var warm = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
             warm.Tick += (s, e2) =>
@@ -143,6 +148,7 @@ namespace PrismDock
                 Native.DeregisterShellHookWindow(hwnd);
                 if (hookFg != IntPtr.Zero) Native.UnhookWinEvent(hookFg);
                 if (hookMin != IntPtr.Zero) Native.UnhookWinEvent(hookMin);
+                if (hookShow != IntPtr.Zero) Native.UnhookWinEvent(hookShow);
             }
             catch { }
         }
@@ -305,6 +311,19 @@ namespace PrismDock
             entrance.To(0);
             if (host != null) host.Start();
             RestartAutoHide();
+        }
+
+        // fullscreen must be seen on 2 consecutive checks (~0.5 s) before anything moves: no hide/show flicker
+        int fsVotes; bool fsWant;
+        void FsVote(IntPtr h)
+        {
+            bool fs = Tracker.IsFullscreen(h);
+            if (fs != fsWant) { fsWant = fs; fsVotes = 0; }
+            if (fs == hiddenFs) { fsVotes = 0; return; }
+            if (++fsVotes < 2) return;
+            fsVotes = 0;
+            EventLog.Write("fullscreen " + (fs ? "ON  " : "OFF ") + EventLog.Describe(h));
+            SetFullscreen(fs);
         }
 
         void SetFullscreen(bool fs)
@@ -1030,12 +1049,21 @@ namespace PrismDock
         // ---------------------------------------------------------------- win32 events
         void OnWinEvent(IntPtr hook, uint ev, IntPtr h, int idObj, int idChild, uint thread, uint time)
         {
+            if (ev == 0x8002)
+            {
+                if (idObj == 0 && App.S.HideTaskbar && Taskbar.IsTray(h))
+                {
+                    Native.ShowWindow(h, Native.SW_HIDE);
+                    if ((DateTime.Now - lastReshowLog).TotalSeconds > 1) { lastReshowLog = DateTime.Now; EventLog.Write("taskbar re-shown by explorer -> hidden"); }
+                }
+                return;
+            }
             Diag.Hit("winev" + ev);
             if (ev == 3)
             {
                 UpdateStates();
                 WatchForeground(h);
-                SetFullscreen(Tracker.IsFullscreen(h));
+                FsVote(h);
                 if (host != null) host.Kick();
             }
             else { ScheduleRefresh(); if (host != null) host.Kick(); }
@@ -1049,8 +1077,19 @@ namespace PrismDock
         {
             if (fsPoll != null) return;
             fsPoll = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
-            fsPoll.Tick += (s, e) => SetFullscreen(Tracker.IsFullscreen(Native.GetForegroundWindow()));
+            fsPoll.Tick += (s, e) => FsVote(Native.GetForegroundWindow());
             fsPoll.Start();
+        }
+
+        DateTime lastReshowLog;
+        /// EVENT_OBJECT_SHOW from explorer only (its taskbar); re-attached when explorer restarts
+        void HookExplorerShow()
+        {
+            if (hookShow != IntPtr.Zero) { Native.UnhookWinEvent(hookShow); hookShow = IntPtr.Zero; }
+            IntPtr tray = Native.FindWindow("Shell_TrayWnd", null);
+            if (tray == IntPtr.Zero) return;
+            uint pid; Native.GetWindowThreadProcessId(tray, out pid);
+            hookShow = Native.SetWinEventHook(0x8002, 0x8002, IntPtr.Zero, winProc, pid, 0, 0);
         }
 
         void ScheduleFsCheck()
@@ -1058,7 +1097,7 @@ namespace PrismDock
             if (fsCheck == null)
             {
                 fsCheck = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
-                fsCheck.Tick += (s, e) => { fsCheck.Stop(); SetFullscreen(Tracker.IsFullscreen(Native.GetForegroundWindow())); };
+                fsCheck.Tick += (s, e) => { fsCheck.Stop(); FsVote(Native.GetForegroundWindow()); };
             }
             fsCheck.Stop(); fsCheck.Start();
         }
@@ -1088,7 +1127,7 @@ namespace PrismDock
             else if (msg == (int)taskbarCreatedMsg && taskbarCreatedMsg != 0)
             {
                 var dt = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
-                dt.Tick += (s, e) => { dt.Stop(); if (App.S.HideTaskbar) Taskbar.Hide(App.S); Taskbar.Unreserve(hwnd); Layout(); };
+                dt.Tick += (s, e) => { dt.Stop(); EventLog.Write("explorer restarted"); HookExplorerShow(); if (App.S.HideTaskbar) Taskbar.HideHard(App.S); Taskbar.Unreserve(hwnd); Layout(); };
                 dt.Start();
             }
             else if (msg == (int)Taskbar.CallbackMsg)
