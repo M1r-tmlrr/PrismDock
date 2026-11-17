@@ -195,6 +195,13 @@ namespace PrismDock
             }
         }
 
+        public static List<KeyValuePair<int, AppEntry>> MatchScored(string q, int max)
+        {
+            var list = Match(q, max);
+            string f = Search.Fold(q.Trim());
+            return list.Select(a => new KeyValuePair<int, AppEntry>(a.Key == f ? 120 : Math.Max(Score(a.Key, f), 60), a)).ToList();
+        }
+
         /// best matches for a query (name prefix > word prefix > initials > substring)
         public static List<AppEntry> Match(string q, int max)
         {
@@ -216,7 +223,7 @@ namespace PrismDock
             return scored.OrderByDescending(x => x.Key).Take(max).Select(x => x.Value).ToList();
         }
 
-        static int Score(string name, string q)
+        internal static int Score(string name, string q)
         {
             if (name.StartsWith(q)) return 100;
             var words = name.Split(new[] { ' ', '-', '_', '.', '(' }, StringSplitOptions.RemoveEmptyEntries);
@@ -429,12 +436,21 @@ namespace PrismDock
             }
             var calc = Calc(q);
             if (calc != null) results.Add(calc);
-            foreach (var a in AppCatalog.Match(q, 6))
+            var appHits = AppCatalog.MatchScored(q, 6);
+            var setHits = SettingsPages.Match(q, 5);
+            var appRes = new List<Result>();
+            foreach (var h in appHits)
             {
+                var a = h.Value;
                 var r = AppResult(a.Name, a.Launch, a.Launch.StartsWith("shell:") || a.Launch.EndsWith(":") ? "Uygulama" : (a.Admin ? "Sistem aracı · Ctrl+Shift+Enter: yönetici olarak" : "Uygulama"), a.Icon);
                 if (a.Admin) { string l = a.Launch; r.OpenAdmin = () => { try { Process.Start(new ProcessStartInfo(l) { UseShellExecute = true, Verb = "runas" }); } catch { } }; }
-                results.Add(r);
+                appRes.Add(r);
             }
+            var setRes = setHits.Select(h => SettingResult(h.Value)).ToList();
+            // whichever group matches better comes first (Enter opens the first row)
+            int bestApp = appHits.Count > 0 ? appHits.Max(h => h.Key) : 0, bestSet = setHits.Count > 0 ? setHits.Max(h => h.Key) : 0;
+            if (bestSet > bestApp) { results.AddRange(setRes); results.AddRange(appRes); }
+            else { results.AddRange(appRes); results.AddRange(setRes); }
             appCount = results.Count;
             results.Add(WebResult(q));
             Render(null, 0);
@@ -483,6 +499,16 @@ namespace PrismDock
                 Name = h.Name, Sub = dir, IconPath = h.Path, Kind = h.Folder ? "Klasörler ve dosyalar" : "Klasörler ve dosyalar",
                 Open = () => { try { Process.Start(new ProcessStartInfo(h.Path) { UseShellExecute = true }); } catch { } },
                 OpenFolder = () => Reveal(h.Path)
+            };
+        }
+
+        Result SettingResult(SettingsPages.Page pg)
+        {
+            string uri = pg.Uri;
+            return new Result
+            {
+                Name = pg.Name, Sub = "Ayarlar · " + pg.Group, Kind = "Ayarlar", IconPath = AppCatalog.SettingsIcon,
+                Open = () => { try { Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true }); } catch { } }
             };
         }
 
@@ -750,6 +776,121 @@ namespace PrismDock
         protected override void Opened()
         {
             if (box != null) { box.Text = ""; Dispatcher.BeginInvoke(new Action(() => box.Focus()), DispatcherPriority.Input); }
+        }
+    }
+
+    /// Pages of the Windows Settings app, searchable like apps ("başlangıç uygulamaları" -> Settings > Apps > Startup).
+    static class SettingsPages
+    {
+        public class Page { public string Name, Group, Uri, Key, Words; }
+        static List<Page> pages;
+
+        static void Add(string name, string group, string uri, string words)
+        {
+            pages.Add(new Page { Name = name, Group = group, Uri = "ms-settings:" + uri, Key = Search.Fold(name), Words = Search.Fold(name + " " + group + " " + words) });
+        }
+
+        static List<Page> All
+        {
+            get
+            {
+                if (pages != null) return pages;
+                pages = new List<Page>();
+                // System
+                Add("Ekran", "Sistem", "display", "display monitor çözünürlük resolution ölçek scale parlaklık brightness");
+                Add("Gece ışığı", "Sistem", "nightlight", "night light mavi ışık blue light");
+                Add("Ses", "Sistem", "sound", "sound hoparlör speaker mikrofon microphone audio");
+                Add("Ses düzeyi karıştırıcısı", "Sistem", "apps-volume", "volume mixer uygulama ses seviyesi");
+                Add("Bildirimler ve eylemler", "Sistem", "notifications", "notifications bildirim");
+                Add("Odak yardımı", "Sistem", "quiethours", "focus assist rahatsız etmeyin do not disturb");
+                Add("Güç ve uyku", "Sistem", "powersleep", "power sleep uyku ekran kapanma enerji");
+                Add("Pil", "Sistem", "batterysaver", "battery pil tasarrufu");
+                Add("Depolama", "Sistem", "storagesense", "storage disk alan temizleme depolama algısı");
+                Add("Çoklu görev", "Sistem", "multitasking", "multitasking snap pencere yaslama alt tab");
+                Add("Pano", "Sistem", "clipboard", "clipboard kopyala yapıştır geçmiş");
+                Add("Uzak Masaüstü", "Sistem", "remotedesktop", "remote desktop rdp");
+                Add("Hakkında", "Sistem", "about", "about bilgisayar adı pc name sürüm version sistem bilgisi");
+                // Devices
+                Add("Bluetooth ve diğer cihazlar", "Cihazlar", "bluetooth", "bluetooth devices cihaz kulaklık");
+                Add("Yazıcılar ve tarayıcılar", "Cihazlar", "printers", "printers scanner yazıcı");
+                Add("Fare", "Cihazlar", "mousetouchpad", "mouse touchpad imleç hız");
+                Add("Yazma", "Cihazlar", "typing", "typing klavye keyboard otomatik düzeltme");
+                Add("Otomatik Kullan", "Cihazlar", "autoplay", "autoplay usb");
+                // Network
+                Add("Ağ ve İnternet", "Ağ", "network-status", "network internet durum status");
+                Add("Wi-Fi", "Ağ", "network-wifi", "wifi kablosuz wireless");
+                Add("Ethernet", "Ağ", "network-ethernet", "ethernet kablo");
+                Add("VPN", "Ağ", "network-vpn", "vpn");
+                Add("Uçak modu", "Ağ", "network-airplanemode", "airplane mode");
+                Add("Proxy", "Ağ", "network-proxy", "proxy ara sunucu");
+                Add("Mobil etkin nokta", "Ağ", "network-mobilehotspot", "hotspot paylaşım");
+                // Personalization
+                Add("Arka plan", "Kişiselleştirme", "personalization-background", "background duvar kağıdı wallpaper");
+                Add("Renkler", "Kişiselleştirme", "colors", "colors koyu mod dark mode açık tema vurgu rengi accent");
+                Add("Kilit ekranı", "Kişiselleştirme", "lockscreen", "lock screen");
+                Add("Temalar", "Kişiselleştirme", "themes", "themes tema");
+                Add("Yazı tipleri", "Kişiselleştirme", "fonts", "fonts font");
+                Add("Başlat", "Kişiselleştirme", "personalization-start", "start menu başlat menüsü");
+                Add("Görev çubuğu", "Kişiselleştirme", "taskbar", "taskbar");
+                // Apps
+                Add("Uygulamalar ve özellikler", "Uygulamalar", "appsfeatures", "apps features kaldır uninstall program yüklü installed");
+                Add("Varsayılan uygulamalar", "Uygulamalar", "defaultapps", "default apps tarayıcı browser varsayılan");
+                Add("Başlangıç uygulamaları", "Uygulamalar", "startupapps", "startup apps açılış başlangıç otomatik başlat autostart");
+                Add("Çevrimdışı haritalar", "Uygulamalar", "maps", "maps harita");
+                Add("İsteğe bağlı özellikler", "Uygulamalar", "optionalfeatures", "optional features");
+                // Accounts
+                Add("Bilgileriniz", "Hesaplar", "yourinfo", "account hesap profil your info");
+                Add("Oturum açma seçenekleri", "Hesaplar", "signinoptions", "sign in pin parola şifre password windows hello");
+                Add("Aile ve diğer kullanıcılar", "Hesaplar", "otherusers", "users kullanıcı aile family");
+                Add("E-posta ve hesaplar", "Hesaplar", "emailandaccounts", "email mail hesaplar");
+                // Time & language
+                Add("Tarih ve saat", "Zaman ve Dil", "dateandtime", "date time saat dilimi time zone");
+                Add("Bölge", "Zaman ve Dil", "regionformatting", "region format bölge biçim");
+                Add("Dil", "Zaman ve Dil", "regionlanguage", "language dil klavye düzeni keyboard layout");
+                Add("Konuşma", "Zaman ve Dil", "speech", "speech ses tanıma");
+                // Gaming
+                Add("Oyun Modu", "Oyun", "gaming-gamemode", "game mode oyun");
+                Add("Xbox Game Bar", "Oyun", "gaming-gamebar", "game bar xbox kayıt");
+                Add("Yakalamalar", "Oyun", "gaming-gamedvr", "captures kayıt ekran kaydı");
+                // Ease of access
+                Add("Erişim Kolaylığı", "Erişilebilirlik", "easeofaccess-display", "accessibility ease of access metin boyutu");
+                Add("Ekran Okuyucusu", "Erişilebilirlik", "easeofaccess-narrator", "narrator");
+                Add("Büyüteç", "Erişilebilirlik", "easeofaccess-magnifier", "magnifier");
+                // Privacy
+                Add("Gizlilik", "Gizlilik", "privacy", "privacy");
+                Add("Konum", "Gizlilik", "privacy-location", "location konum izni");
+                Add("Kamera izinleri", "Gizlilik", "privacy-webcam", "camera webcam kamera");
+                Add("Mikrofon izinleri", "Gizlilik", "privacy-microphone", "microphone mikrofon");
+                // Update & security
+                Add("Windows Update", "Güncelleme ve Güvenlik", "windowsupdate", "update güncelleme");
+                Add("Windows Güvenliği", "Güncelleme ve Güvenlik", "windowsdefender", "security defender virüs antivirus güvenlik");
+                Add("Yedekleme", "Güncelleme ve Güvenlik", "backup", "backup yedek");
+                Add("Sorun giderme", "Güncelleme ve Güvenlik", "troubleshoot", "troubleshoot sorun");
+                Add("Kurtarma", "Güncelleme ve Güvenlik", "recovery", "recovery sıfırla reset");
+                Add("Etkinleştirme", "Güncelleme ve Güvenlik", "activation", "activation lisans aktivasyon");
+                Add("Geliştiriciler için", "Güncelleme ve Güvenlik", "developers", "developer geliştirici modu");
+                return pages;
+            }
+        }
+
+        public static List<KeyValuePair<int, Page>> Match(string q, int max)
+        {
+            string f = Search.Fold(q.Trim());
+            var res = new List<KeyValuePair<int, Page>>();
+            if (f.Length < 2) return res;
+            var tokens = f.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var pg in All)
+            {
+                int sc = pg.Key == f ? 120 + 5 : AppCatalog.Score(pg.Key, f);   // exact name wins (Ses -> Settings > Sound)
+                if (sc == 0)
+                {
+                    // every typed word starts some word of the page name / its keywords ("uygulama başlangıç", "startup")
+                    var words = pg.Words.Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (tokens.All(t => words.Any(w => w.StartsWith(t)))) sc = tokens.Length > 1 ? 75 : 70;
+                }
+                if (sc > 0) res.Add(new KeyValuePair<int, Page>(sc - Math.Min(pg.Key.Length, 40) / 8, pg));
+            }
+            return res.OrderByDescending(x => x.Key).Take(max).ToList();
         }
     }
 
