@@ -63,6 +63,7 @@ namespace PrismDock
         {
             string p = Launch ?? Exe;
             if (p == null || p.StartsWith("hwnd:")) return;
+            if (p.EndsWith("Immersive Control Panel.lnk", StringComparison.OrdinalIgnoreCase)) p = "ms-settings:";
             try { Process.Start(new ProcessStartInfo(p) { UseShellExecute = true }); } catch { }
         }
     }

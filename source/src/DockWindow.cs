@@ -165,7 +165,7 @@ namespace PrismDock
             try
             {
                 Native.UnregisterHotKey(hwnd, HotkeyId);
-                WinKeyHook.Enable(false);
+                WinKeyHook.Enable(false, hwnd);
                 Taskbar.Unreserve(hwnd);
                 Native.DeregisterShellHookWindow(hwnd);
                 if (hookFg != IntPtr.Zero) Native.UnhookWinEvent(hookFg);
@@ -180,8 +180,7 @@ namespace PrismDock
             if (hwnd == IntPtr.Zero) return;
             Native.UnregisterHotKey(hwnd, HotkeyId);
             if (App.S.SearchHotkey) Native.RegisterHotKey(hwnd, HotkeyId, 0x1 | 0x4000, 0x20); // Alt + Space, no repeat
-            WinKeyHook.Pressed = () => OpenStart(true);
-            WinKeyHook.Enable(App.S.WinKeyMenu);
+            WinKeyHook.Enable(App.S.WinKeyMenu, hwnd);
         }
 
         void LoadPins()
@@ -744,11 +743,17 @@ namespace PrismDock
 
         public void OpenSettings() { var p = settingsP ?? (settingsP = new SettingsPanel()); if (!p.IsOpen) p.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top); }
 
+        /// open the search with text already typed (start panel hand-off); if it is open, just add the text
         public void OpenSearch(string q)
         {
-            OpenSearch();
-            if (search != null && search.IsOpen) search.DebugQuery(q);
+            var p = search ?? (search = new SearchWindow());
+            if (p.IsOpen) { p.Append(q); return; }
+            p.Pending = q;
+            foreach (var o in Panels) if (o != p && o.IsOpen && !(o is StartPanel)) o.CloseAnimated();
+            p.OpenCentered();
         }
+
+        public void AppendSearch(string q) { if (search != null && search.IsOpen) search.Append(q); else OpenSearch(q); }
 
         public void OpenStart(bool fromKey)
         {
@@ -756,7 +761,6 @@ namespace PrismDock
             if (p.IsOpen) { p.CloseAnimated(); return; }
             if ((DateTime.Now - p.ClosedAt).TotalMilliseconds < 250) return;
             foreach (var o in Panels) if (o != p && o.IsOpen) o.CloseAnimated();
-            p.ApplyTheme();
             p.ForceForeground = fromKey;
             p.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top);
             RestartAutoHide();
@@ -1217,6 +1221,7 @@ namespace PrismDock
         IntPtr WndProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled)
         {
             if (msg == 0x21) { handled = true; return (IntPtr)3; } // WM_MOUSEACTIVATE -> MA_NOACTIVATE
+            if (msg == (int)WinKeyHook.TapMsg && WinKeyHook.TapMsg != 0) { OpenStart(true); handled = true; return IntPtr.Zero; } // Win tapped (key hook helper)
             if (msg == 0x312 && w.ToInt32() == HotkeyId) { OpenSearch(); handled = true; return IntPtr.Zero; } // WM_HOTKEY
             if (msg == (int)shellMsg && shellMsg != 0)
             {

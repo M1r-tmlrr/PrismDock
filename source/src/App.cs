@@ -19,6 +19,8 @@ namespace PrismDock
         [STAThread]
         static void Main(string[] args)
         {
+            // the Windows-key hook runs in its own tiny process (see KeyHook.cs); nothing else is loaded there
+            if (args.Length >= 3 && args[0] == "--keyhook") { WinKeyHook.RunHelper(args); return; }
             // multi-core JIT: the first run records what gets compiled at startup, later runs compile it in parallel
             try { System.Runtime.ProfileOptimization.SetProfileRoot(Settings.Dir); System.Runtime.ProfileOptimization.StartProfile("startup.jit"); } catch { }
             S = Settings.Load();
@@ -103,9 +105,10 @@ namespace PrismDock
             EventLog.Write("start  build " + EventLog.WindowsBuild + "  dock shown in " + startClock.ElapsedMilliseconds + " ms" +
                 "  (" + (int)(DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime).TotalMilliseconds + " ms since process start, uptime " + (Native.GetTickCount64() / 1000) + " s)");
             string selfExe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            bool wantAutoStart = S.AutoStart;
             System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                bool on = AutoStart.Migrate(selfExe);
+                bool on = AutoStart.Migrate(selfExe, wantAutoStart);
                 autoApplied = on;
                 Dock.Dispatcher.BeginInvoke(new Action(() => { if (S.AutoStart != on) { S.AutoStart = on; S.Save(); } }));
             });

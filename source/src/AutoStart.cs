@@ -10,7 +10,10 @@ namespace PrismDock
     /// (measured ~17 s here); the logon task starts immediately. No admin rights needed.
     static class AutoStart
     {
-        const string TaskName = "PrismDock";
+        // "PrismDock" was the first name; a security tool can delete a task's file but leave its registration,
+        // after which that name can be neither replaced nor deleted without admin rights -> new name, old one cleaned up
+        const string TaskName = "PrismDock Autostart";
+        const string LegacyTask = "PrismDock";
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
         public static bool RunKeyExists()
@@ -51,10 +54,11 @@ namespace PrismDock
         }
 
         /// path of the exe the logon task starts, or null when there is no task
-        public static string TaskExe()
+        public static string TaskExe() { return TaskExe(TaskName); }
+        static string TaskExe(string name)
         {
             int code;
-            string xml = Schtasks("/query /tn \"" + TaskName + "\" /xml", out code);
+            string xml = Schtasks("/query /tn \"" + name + "\" /xml", out code);
             if (code != 0) return null;
             int a = xml.IndexOf("<Command>", StringComparison.Ordinal), b = xml.IndexOf("</Command>", StringComparison.Ordinal);
             if (a < 0 || b < a) return "";
@@ -91,6 +95,7 @@ namespace PrismDock
         {
             int code;
             Schtasks("/delete /tn \"" + TaskName + "\" /f", out code);
+            Schtasks("/delete /tn \"" + LegacyTask + "\" /f", out code);
         }
 
         /// turn on / off (also cleans up the old Run key so it can't start twice)
@@ -109,10 +114,26 @@ namespace PrismDock
 
         /// on startup: move an old Run-key autostart over to the logon task, fix the path if the exe moved.
         /// returns whether autostart is on.
-        public static bool Migrate(string exe)
+        public static bool Migrate(string exe) { return Migrate(exe, false); }
+
+        /// wanted: the user's setting says "start with Windows" (re-creates the task if e.g. a security tool deleted it)
+        public static bool Migrate(string exe, bool wanted)
         {
             bool run = RunKeyExists();
             string task = TaskExe();
+            if (TaskExe(LegacyTask) != null)
+            {
+                // move an install of 2.1.1/2.1.2 over to the new task name
+                int code;
+                if (CreateTask(exe)) { Schtasks("/delete /tn \"" + LegacyTask + "\" /f", out code); EventLog.Write("autostart: task renamed"); }
+                return true;
+            }
+            if (!run && task == null && wanted)
+            {
+                bool ok = CreateTask(exe);
+                EventLog.Write("autostart: logon task was missing -> " + (ok ? "re-created" : "could not re-create"));
+                return ok;
+            }
             if (run)
             {
                 if (CreateTask(exe)) { RemoveRunKey(); EventLog.Write("autostart: Run key -> logon task"); }

@@ -17,7 +17,7 @@ namespace PrismDock
 {
     class AppEntry
     {
-        public string Name, Launch, Target, Key, Alias = "";
+        public string Name, Launch, Target, Key, Alias = "", Icon;   // Icon: optional different path for the icon
         public bool Admin;   // offer "run as administrator"
     }
 
@@ -78,7 +78,8 @@ namespace PrismDock
                     }
                     seen.Add(key);
                     var e = new AppEntry { Name = name, Launch = f, Target = string.IsNullOrEmpty(target) ? null : target, Key = key };
-                    e.Alias = Search.Fold(fileName + " " + (e.Target != null ? Path.GetFileNameWithoutExtension(e.Target) : "") + " " + AliasFor(e.Target));
+                    bool cpl = e.Target != null && Path.GetFileName(e.Target).Equals("control.exe", StringComparison.OrdinalIgnoreCase) && key != Search.Fold("Denetim Masası");
+                    e.Alias = Search.Fold(fileName + " " + (cpl || e.Target == null ? "" : Path.GetFileNameWithoutExtension(e.Target) + " " + AliasFor(e.Target)));
                     e.Admin = IsConsole(e.Target);
                     res.Add(e);
                 }
@@ -107,6 +108,8 @@ namespace PrismDock
             res.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
         }
 
+        public const string SettingsIcon = @"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+
         static string Sys(string exe) { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), exe); }
 
         /// essential system tools, guaranteed to be findable even if their Start Menu shortcut is missing or renamed
@@ -128,19 +131,32 @@ namespace PrismDock
                 new[] { "Sistem Yapılandırması", Sys("msconfig.exe") },
                 new[] { "Sistem Bilgileri", Sys("msinfo32.exe") },
                 new[] { "Dosya Gezgini", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe") },
-                new[] { "Ayarlar", "ms-settings:" },
+                // the Start Menu "Settings" shortcut points at Control.exe (Windows opens it as Settings through its app id):
+                // launch the Settings app itself
+                new[] { "Ayarlar", "ms-settings:", "ayarlar settings windows ayarlari ms-settings" },
             };
             if (File.Exists(wt)) list.Insert(0, new[] { "Terminal", wt });
             foreach (var b in list)
             {
                 string key = Search.Fold(b[0]);
-                if (b[1] != "ms-settings:" && !File.Exists(b[1])) continue;
-                // an existing entry for the same tool: just enrich its aliases
-                var same = res.FirstOrDefault(x => x.Key == key || (x.Target != null && string.Equals(x.Target, b[1], StringComparison.OrdinalIgnoreCase)));
-                string alias = Search.Fold(Path.GetFileNameWithoutExtension(b[1]) + " " + AliasFor(b[1]));
-                if (same != null) { same.Alias += " " + alias; same.Admin |= IsConsole(b[1]) || b[1].EndsWith("regedit.exe"); continue; }
+                bool shellItem = DockApp.IsShellPath(b[1]) || b[1].EndsWith(":");   // shell:AppsFolder\..., ms-settings:
+                if (!shellItem && !File.Exists(b[1])) continue;
+                string alias = b.Length > 2 ? Search.Fold(b[2]) : Search.Fold(Path.GetFileNameWithoutExtension(b[1]) + " " + AliasFor(b[1]));
+                // same name in the Start Menu: the built-in definition wins (its shortcut may point somewhere else)
+                var byName = res.FirstOrDefault(x => x.Key == key);
+                if (byName != null)
+                {
+                    byName.Launch = b[1]; byName.Target = shellItem ? null : b[1]; byName.Alias = alias;
+                    if (b[1] == "ms-settings:") byName.Icon = SettingsIcon;
+                    byName.Admin = IsConsole(b[1]) || b[1].EndsWith(".msc") || b[1].EndsWith("regedit.exe");
+                    continue;
+                }
+                // same exe under another name: only add search words (never for Control.exe, several shortcuts use it)
+                var byTarget = shellItem || Path.GetFileName(b[1]).Equals("control.exe", StringComparison.OrdinalIgnoreCase) ? null
+                    : res.FirstOrDefault(x => x.Target != null && string.Equals(x.Target, b[1], StringComparison.OrdinalIgnoreCase));
+                if (byTarget != null) { byTarget.Alias += " " + alias; byTarget.Admin |= IsConsole(b[1]) || b[1].EndsWith("regedit.exe"); continue; }
                 seen.Add(key);
-                res.Add(new AppEntry { Name = b[0], Launch = b[1], Target = b[1], Key = key, Alias = alias, Admin = IsConsole(b[1]) || b[1].EndsWith(".msc") || b[1].EndsWith("regedit.exe") });
+                res.Add(new AppEntry { Name = b[0], Launch = b[1], Target = shellItem ? null : b[1], Key = key, Alias = alias, Icon = b[1] == "ms-settings:" ? SettingsIcon : null, Admin = IsConsole(b[1]) || b[1].EndsWith(".msc") || b[1].EndsWith("regedit.exe") });
             }
         }
 
@@ -367,9 +383,20 @@ namespace PrismDock
             return g;
         }
 
+        public string Pending;   // text typed before the window existed (from the start panel)
+        public void Append(string s)
+        {
+            if (box == null) { Pending = (Pending ?? "") + s; return; }
+            box.Text += s; box.CaretIndex = box.Text.Length;
+            if (!box.IsKeyboardFocused) { Activate(); box.Focus(); Keyboard.Focus(box); }
+        }
+
         protected override void Opened()
         {
-            box.Text = "";
+            box.Text = Pending ?? "";
+            Pending = null;
+            box.CaretIndex = box.Text.Length;
+            box.Focus(); Keyboard.Focus(box);
             OnText();
             Dispatcher.BeginInvoke(new Action(() => { Activate(); box.Focus(); Keyboard.Focus(box); }), DispatcherPriority.Input);
         }
@@ -404,7 +431,7 @@ namespace PrismDock
             if (calc != null) results.Add(calc);
             foreach (var a in AppCatalog.Match(q, 6))
             {
-                var r = AppResult(a.Name, a.Launch, a.Launch.StartsWith("shell:") ? "Uygulama" : (a.Admin ? "Sistem aracı · Ctrl+Shift+Enter: yönetici olarak" : "Uygulama"));
+                var r = AppResult(a.Name, a.Launch, a.Launch.StartsWith("shell:") || a.Launch.EndsWith(":") ? "Uygulama" : (a.Admin ? "Sistem aracı · Ctrl+Shift+Enter: yönetici olarak" : "Uygulama"), a.Icon);
                 if (a.Admin) { string l = a.Launch; r.OpenAdmin = () => { try { Process.Start(new ProcessStartInfo(l) { UseShellExecute = true, Verb = "runas" }); } catch { } }; }
                 results.Add(r);
             }
@@ -436,13 +463,13 @@ namespace PrismDock
             }, tok, TaskCreationOptions.None, TaskScheduler.Default);
         }
 
-        Result AppResult(string name, string launch, string sub)
+        Result AppResult(string name, string launch, string sub, string icon = null)
         {
             return new Result
             {
-                Name = name, Sub = sub, IconPath = launch, Kind = "Uygulamalar",
+                Name = name, Sub = sub, IconPath = icon ?? launch, Kind = "Uygulamalar",
                 Open = () => { try { Process.Start(new ProcessStartInfo(launch) { UseShellExecute = true }); } catch { } },
-                OpenFolder = launch.StartsWith("shell:") ? (Action)null : () => Reveal(launch)
+                OpenFolder = launch.StartsWith("shell:") || launch.EndsWith(":") ? (Action)null : () => Reveal(launch)
             };
         }
 

@@ -1022,7 +1022,8 @@ namespace PrismDockSetup
                 bool task = o.AutoStart && LogonTask(exe);
                 if (o.AutoStart && !task) k.SetValue("PrismDock", "\"" + exe + "\"");   // fallback
                 else if (k.GetValue("PrismDock") != null) k.DeleteValue("PrismDock");
-                if (!o.AutoStart) Schtasks("/delete /tn \"PrismDock\" /f");
+                if (!o.AutoStart) Schtasks("/delete /tn \"PrismDock Autostart\" /f");
+                Schtasks("/delete /tn \"PrismDock\" /f");   // name used by 2.1.x
             }
             Step(rep, 1.0, "Tamamlandı");
         }
@@ -1048,7 +1049,7 @@ namespace PrismDockSetup
                 "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>4</Priority></Settings>" +
                 "<Actions Context=\"Author\"><Exec><Command>\"" + System.Security.SecurityElement.Escape(exe) + "\"</Command><WorkingDirectory>" + System.Security.SecurityElement.Escape(Path.GetDirectoryName(exe)) + "</WorkingDirectory></Exec></Actions></Task>";
             string f = Path.Combine(Path.GetTempPath(), "prismdock-task.xml");
-            try { File.WriteAllText(f, xml, System.Text.Encoding.Unicode); return Schtasks("/create /tn \"PrismDock\" /xml \"" + f + "\" /f") == 0; }
+            try { File.WriteAllText(f, xml, System.Text.Encoding.Unicode); return Schtasks("/create /tn \"PrismDock Autostart\" /xml \"" + f + "\" /f") == 0; }
             catch { return false; }
             finally { try { File.Delete(f); } catch { } }
         }
@@ -1065,6 +1066,7 @@ namespace PrismDockSetup
             Step(rep, 0.52, "Kayıt bilgileri temizleniyor…");
             using (var k = Registry.CurrentUser.OpenSubKey(RunKey, true))
                 if (k != null && k.GetValue("PrismDock") != null) k.DeleteValue("PrismDock");
+            Schtasks("/delete /tn \"PrismDock Autostart\" /f");
             Schtasks("/delete /tn \"PrismDock\" /f");
             try { Registry.CurrentUser.DeleteSubKeyTree(UninstKey, false); } catch { }
 

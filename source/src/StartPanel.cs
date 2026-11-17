@@ -14,95 +14,6 @@ using System.Windows.Threading;
 
 namespace PrismDock
 {
-    /// Turns a lone press of the Windows key into "open PrismDock's start panel".
-    /// Win + anything (Win+E, Win+L, Win+Shift+S ...) keeps working: we only act when Win was pressed and
-    /// released alone, and then inject a neutral "mask" key so Windows doesn't open its own Start menu.
-    static class WinKeyHook
-    {
-        static IntPtr hook;
-        static Native.LowLevelProc proc;
-        static bool winDown, combo;
-        public static Action Pressed;
-
-        static Dispatcher hookThread;
-        static Dispatcher ui;
-
-        /// The hook lives on its own thread with its own message loop, so a busy UI can never lag the keyboard.
-        public static void Enable(bool on)
-        {
-            if (ui == null) ui = Dispatcher.CurrentDispatcher;
-            if (on && hookThread == null)
-            {
-                var ready = new System.Threading.ManualResetEvent(false);
-                var th = new System.Threading.Thread(() =>
-                {
-                    hookThread = Dispatcher.CurrentDispatcher;
-                    proc = Proc;
-                    hook = Native.SetWindowsHookEx(13, proc, Native.GetModuleHandle(null), 0); // WH_KEYBOARD_LL
-                    ready.Set();
-                    Dispatcher.Run();
-                }) { IsBackground = true, Name = "PrismDock key hook", Priority = System.Threading.ThreadPriority.AboveNormal };
-                th.SetApartmentState(System.Threading.ApartmentState.STA);
-                th.Start();
-                ready.WaitOne(2000);
-            }
-            else if (!on && hookThread != null)
-            {
-                var d = hookThread; hookThread = null;
-                d.BeginInvoke(new Action(() => { if (hook != IntPtr.Zero) Native.UnhookWindowsHookEx(hook); hook = IntPtr.Zero; Dispatcher.CurrentDispatcher.InvokeShutdown(); }));
-            }
-        }
-
-        static IntPtr Proc(int code, IntPtr w, IntPtr l)
-        {
-            if (code >= 0)
-            {
-                var k = (Native.KBDLLHOOKSTRUCT)Marshal.PtrToStructure(l, typeof(Native.KBDLLHOOKSTRUCT));
-                bool injected = (k.flags & 0x10) != 0;
-                int msg = w.ToInt32();
-                bool down = msg == 0x100 || msg == 0x104, up = msg == 0x101 || msg == 0x105;
-                bool isWin = k.vkCode == 0x5B || k.vkCode == 0x5C;
-                if (!injected)
-                {
-                    if (isWin)
-                    {
-                        if (down && !winDown) { winDown = true; combo = false; }
-                        else if (up && winDown)
-                        {
-                            winDown = false;
-                            if (!combo)
-                            {
-                                Mask();
-                                var a = Pressed;
-                                if (a != null && ui != null) ui.BeginInvoke(a);
-                            }
-                        }
-                    }
-                    else if (down && winDown) combo = true;
-                }
-            }
-            return Native.CallNextHookEx(hook, code, w, l);
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct INPUT { public uint type; public KEYBDINPUT ki; public long pad; }
-        [StructLayout(LayoutKind.Sequential)]
-        struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
-        [DllImport("user32.dll")] static extern uint SendInput(uint n, INPUT[] inputs, int size);
-
-        /// vkE8 is unassigned: pressing it between Win-down and Win-up cancels the Start menu.
-        static void Mask()
-        {
-            var i = new INPUT[2];
-            i[0].type = 1; i[0].ki.vk = 0xE8;
-            i[1].type = 1; i[1].ki.vk = 0xE8; i[1].ki.flags = 2;
-            SendInput(2, i, Marshal.SizeOf(typeof(INPUT)));
-        }
-
-        /// opens the real Windows Start menu (injected, so our hook ignores it)
-        public static void OpenWindowsStart() { Native.Keys(0x5B); }
-    }
-
     /// PrismDock's own start panel: greeting, search, pinned apps, recent files, places and power actions.
     class StartPanel : PanelWindow
     {
@@ -154,29 +65,24 @@ namespace PrismDock
             box.TextChanged += (s, e) =>
             {
                 ph.Visibility = box.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-                if (box.Text.Length > 0) { string q = box.Text; box.Text = ""; CloseAnimated(); App.Dock.OpenSearch(q); }
+                if (box.Text.Length == 0) return;
+                string q = box.Text; box.Text = "";
+                // first key opens the search window; anything typed before it has focus is appended there, never lost
+                if (!handedOff) { handedOff = true; App.Dock.OpenSearch(q); CloseAnimated(); }
+                else App.Dock.AppendSearch(q);
             };
             sg.Children.Add(box);
             sp.Children.Add(sg);
 
             // ---- pinned apps
             sp.Children.Add(Label("SABİTLENENLER"));
-            var grid = new UniformGrid { Columns = 6 };
-            foreach (var p in App.S.Pinned.Take(12))
-            {
-                var a = DockApp.FromPath(p);
-                grid.Children.Add(AppTile(a));
-            }
-            var allBtn = Tile("", "Tümü", () => { CloseAnimated(); App.Dock.OpenAppPicker(); });
-            if (grid.Children.Count < 12) grid.Children.Add(allBtn);
-            sp.Children.Add(grid);
+            pinnedGrid = new UniformGrid { Columns = 6, MinHeight = 70 };
+            sp.Children.Add(pinnedGrid);
 
             // ---- recent files
             sp.Children.Add(Label("SON KULLANILANLAR"));
-            var rec = new StackPanel();
-            foreach (var f in Recent(4)) rec.Children.Add(RecentRow(f));
-            if (rec.Children.Count == 0) rec.Children.Add(Ui.Text("Henüz yok", 12, FontWeights.Normal, Ui.Br(t.Sub)));
-            sp.Children.Add(rec);
+            recentPanel = new StackPanel { MinHeight = 148 };
+            sp.Children.Add(recentPanel);
 
             // ---- places
             var places = new UniformGrid { Columns = 5, Margin = new Thickness(0, 10, 0, 0) };
@@ -206,10 +112,46 @@ namespace PrismDock
             return sp;
         }
 
+        bool handedOff;
+        UniformGrid pinnedGrid; StackPanel recentPanel;
+        string pinSig, recentSig;
+
+        void RefreshLists()
+        {
+            if (pinnedGrid == null) return;
+            var t = Theme.Cur;
+            string ps = string.Join("|", App.S.Pinned.Take(12));
+            if (ps != pinSig)
+            {
+                pinSig = ps;
+                pinnedGrid.Children.Clear();
+                foreach (var p in App.S.Pinned.Take(12)) pinnedGrid.Children.Add(AppTile(DockApp.FromPath(p)));
+                if (pinnedGrid.Children.Count < 12) pinnedGrid.Children.Add(Tile("\uE71D", "Tümü", () => { CloseAnimated(); App.Dock.OpenAppPicker(); }));
+            }
+            var rec = Recent(4);
+            string rs = string.Join("|", rec.Select(f => f.FullName + f.LastWriteTime.Ticks));
+            if (rs != recentSig)
+            {
+                recentSig = rs;
+                recentPanel.Children.Clear();
+                foreach (var f in rec) recentPanel.Children.Add(RecentRow(f));
+                if (rec.Count == 0) recentPanel.Children.Add(Ui.Text("Henüz yok", 12, FontWeights.Normal, Ui.Br(t.Sub)));
+            }
+        }
         protected override void Opened()
         {
-            Dispatcher.BeginInvoke(new Action(() => { if (box != null) { box.Focus(); Keyboard.Focus(box); } }), DispatcherPriority.Input);
+            handedOff = false;
+            if (box != null) { box.Text = ""; box.Focus(); Keyboard.Focus(box); }
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (box != null) { box.Focus(); Keyboard.Focus(box); }
+                WinKeyHook.Release();   // keys typed since the Win tap now arrive here
+            }), DispatcherPriority.Input);
+            // lists that may have changed are refreshed after the panel is already on screen
+            Dispatcher.BeginInvoke(new Action(RefreshLists), DispatcherPriority.Background);
         }
+
+        protected override void Closed2() { WinKeyHook.Release(); }
 
         static void Run(string f, string args = null)
         {

@@ -162,10 +162,19 @@ namespace PrismDock
             Show();
             if (ForceForeground)
             {
-                // opened from a global key: the foreground lock must be lifted (ALT tap trick)
-                Native.keybd_event(0x12, 0, 0, UIntPtr.Zero);
+                // opened from a global key: borrow the foreground thread's input state, fall back to the ALT tap
+                IntPtr fg = Native.GetForegroundWindow();
+                uint fpid; uint fgThread = Native.GetWindowThreadProcessId(fg, out fpid), me = Native.GetCurrentThreadId();
+                bool att = fgThread != 0 && fgThread != me && Native.AttachThreadInput(me, fgThread, true);
+                Native.BringWindowToTop(hwnd);
                 Native.SetForegroundWindow(hwnd);
-                Native.keybd_event(0x12, 0, 2, UIntPtr.Zero);
+                if (att) Native.AttachThreadInput(me, fgThread, false);
+                if (Native.GetForegroundWindow() != hwnd)
+                {
+                    Native.keybd_event(0x12, 0, 0, UIntPtr.Zero);
+                    Native.SetForegroundWindow(hwnd);
+                    Native.keybd_event(0x12, 0, 2, UIntPtr.Zero);
+                }
                 ForceForeground = false;
             }
             Activate();
