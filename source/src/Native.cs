@@ -205,6 +205,19 @@ namespace PrismDock
             finally { CloseHandle(hp); }
         }
 
+        /// Brings h to the front. Windows only lets the process that produced the last input do that; a tap of the
+        /// unassigned virtual key 0xE8 gives us that right without side effects. (The usual ALT tap puts the target
+        /// app into menu mode, so the next keystrokes trigger menu mnemonics / error beeps. AttachThreadInput to the
+        /// foreground thread can freeze us if that app hangs.)
+        public static void ForceForeground(IntPtr h)
+        {
+            if (h == IntPtr.Zero || GetForegroundWindow() == h) return;
+            if (SetForegroundWindow(h) && GetForegroundWindow() == h) return;
+            keybd_event(0xE8, 0, 0, UIntPtr.Zero);
+            keybd_event(0xE8, 0, 2, UIntPtr.Zero);
+            SetForegroundWindow(h);
+        }
+
         public static void Keys(params byte[] vks)
         {
             foreach (var k in vks) keybd_event(k, 0, 0, UIntPtr.Zero);

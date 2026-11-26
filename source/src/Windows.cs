@@ -98,10 +98,7 @@ namespace PrismDock
         public static void Activate(IntPtr h)
         {
             if (Native.IsIconic(h)) Native.ShowWindow(h, Native.SW_RESTORE);
-            // ALT tap trick lets us steal foreground reliably
-            Native.keybd_event(0x12, 0, 0, UIntPtr.Zero);
-            Native.SetForegroundWindow(h);
-            Native.keybd_event(0x12, 0, 2, UIntPtr.Zero);
+            Native.ForceForeground(h);
         }
 
         public static void Minimize(IntPtr h) { Native.ShowWindow(h, Native.SW_MINIMIZE); }
@@ -156,26 +153,49 @@ namespace PrismDock
             if (Native.IsZoomed(h) && (Native.GetWindowLong(h, -16) & 0x00C00000) == 0x00C00000) return false;
             Native.RECT r;
             if (!Native.GetWindowRect(h, out r)) return false;
-            int sw = Native.GetSystemMetrics(0), sh = Native.GetSystemMetrics(1);
-            return r.Left <= 0 && r.Top <= 0 && r.Right >= sw && r.Bottom >= sh;
+            var m = System.Windows.Forms.Screen.FromHandle(h).Bounds;
+            return r.Left <= m.Left && r.Top <= m.Top && r.Right >= m.Right && r.Bottom >= m.Bottom;
         }
     }
 
     static class Icons
     {
         static readonly Dictionary<string, ImageSource> cache = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
-        static IntPtr imageList = IntPtr.Zero;
+
+        /// Shell icon extraction can block for a long time (cloud/OneDrive placeholders, slow shell extensions,
+        /// network paths). It runs on a background STA worker; the UI gets the result when it is ready.
+        public static void Async(System.Windows.Threading.Dispatcher ui, Func<ImageSource> produce, Action<ImageSource> apply)
+        {
+            ShellWorker.Run(() =>
+            {
+                ImageSource img = null;
+                try { img = produce(); if (img != null && img.CanFreeze && !img.IsFrozen) img.Freeze(); } catch { }
+                if (img != null) ui.BeginInvoke(new Action(() => apply(img)));
+            });
+        }
+        // the system image list is a COM object of the thread that fetched it: one per thread, never shared
+        // (sharing it made every replacement worker hang on the stuck thread that owned it)
+        [ThreadStatic] static IntPtr imageList;
 
         public static ImageSource ForPath(string path) { return ForPath(path, 96); }
+
+        /// already loaded? (no shell work at all) -> null when it still has to be fetched
+        public static ImageSource TryCached(string path, int px)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            ImageSource img;
+            lock (cache) { return cache.TryGetValue(px + "|" + path, out img) ? img : null; }
+        }
 
         public static ImageSource ForPath(string path, int px)
         {
             if (string.IsNullOrEmpty(path)) return null;
             ImageSource img;
             string key = px + "|" + path;
-            if (cache.TryGetValue(key, out img)) return img;
+            lock (cache) { if (cache.TryGetValue(key, out img)) return img; }
+            ShellWorker.Current = path;
             img = Factory(path, px) ?? Shell(path);
-            cache[key] = img;
+            lock (cache) { if (cache.Count > 600) cache.Clear(); cache[key] = img; }
             return img;
         }
 
@@ -317,7 +337,7 @@ namespace PrismDock
     /// Resolves .lnk targets via WScript.Shell (lazy COM).
     static class Shortcut
     {
-        static object shell;
+        [ThreadStatic] static object shell;
         public static string Target(string lnk)
         {
             try

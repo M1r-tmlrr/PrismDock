@@ -34,6 +34,7 @@ namespace PrismDock
         protected BackdropHost host;
         protected bool CenterOrigin;
         public bool ForceForeground;
+        public DockWindow AnchorDock;   // the dock (monitor) that opened this panel
         Int32Rect lastRgn = new Int32Rect(-1, -1, -1, -1);
         public bool IsOpen; public DateTime ClosedAt = DateTime.MinValue;
         protected static readonly CultureInfo Tr = new CultureInfo("tr-TR");
@@ -93,36 +94,6 @@ namespace PrismDock
             if (built) { content.Children.Clear(); content.Children.Add(Build()); }
         }
 
-        /// Renders the panel to a PNG without showing a window (used by --snapshot).
-        public void Snapshot(string file) { Snapshot(file, null); }
-        public void Snapshot(string file, Action after)
-        {
-            built = true;
-            var hostS = new GlassSurface(Radius) { Width = PW, Height = PH };
-            hostS.Body.Children.Add(Build());
-            if (after != null)
-            {
-                IsOpen = true;
-                after();
-                var end = DateTime.Now.AddMilliseconds(2500);
-                while (DateTime.Now < end)
-                {
-                    var f = new DispatcherFrame();
-                    Dispatcher.BeginInvoke(DispatcherPriority.ContextIdle, new Action(() => f.Continue = false));
-                    Dispatcher.PushFrame(f);
-                    System.Threading.Thread.Sleep(20);
-                }
-            }
-            var bg = new Grid { Width = PW + 40, Height = PH + 40, Background = new ImageBrush(Wallpaper.Blurred ?? (ImageSource)Icons.Letter("x")) { Stretch = Stretch.UniformToFill } };
-            hostS.Margin = new Thickness(20);
-            bg.Children.Add(hostS);
-            bg.Measure(new Size(bg.Width, bg.Height)); bg.Arrange(new Rect(0, 0, bg.Width, bg.Height)); bg.UpdateLayout();
-            var rtb = new RenderTargetBitmap((int)bg.Width * 2, (int)bg.Height * 2, 192, 192, PixelFormats.Pbgra32);
-            rtb.Render(bg);
-            var enc = new PngBitmapEncoder(); enc.Frames.Add(BitmapFrame.Create(rtb));
-            using (var fs = File.Create(file)) enc.Save(fs);
-        }
-
         protected void Rebuild() { content.Children.Clear(); content.Children.Add(Build()); }
 
         void OnProgress(double p)
@@ -144,8 +115,8 @@ namespace PrismDock
 
         public void OpenAt(double anchorX, double edgeY, bool top)
         {
-            double sw = SystemParameters.PrimaryScreenWidth;
-            Place(Ui.Clamp(anchorX - PW / 2, 8, sw - PW - 8), top ? edgeY + 10 : edgeY - PH - 10, top);
+            var mb = Mon.BoundsAt(anchorX, top ? edgeY + 1 : edgeY - 1);
+            Place(Ui.Clamp(anchorX - PW / 2, mb.Left + 8, mb.Right - PW - 8), top ? edgeY + 10 : edgeY - PH - 10, top);
         }
 
         /// x, y: where the glass itself goes (DIP, screen).
@@ -162,19 +133,9 @@ namespace PrismDock
             Show();
             if (ForceForeground)
             {
-                // opened from a global key: borrow the foreground thread's input state, fall back to the ALT tap
-                IntPtr fg = Native.GetForegroundWindow();
-                uint fpid; uint fgThread = Native.GetWindowThreadProcessId(fg, out fpid), me = Native.GetCurrentThreadId();
-                bool att = fgThread != 0 && fgThread != me && Native.AttachThreadInput(me, fgThread, true);
+                // opened from a global key: take the foreground without ALT taps or thread-input attaching
                 Native.BringWindowToTop(hwnd);
-                Native.SetForegroundWindow(hwnd);
-                if (att) Native.AttachThreadInput(me, fgThread, false);
-                if (Native.GetForegroundWindow() != hwnd)
-                {
-                    Native.keybd_event(0x12, 0, 0, UIntPtr.Zero);
-                    Native.SetForegroundWindow(hwnd);
-                    Native.keybd_event(0x12, 0, 2, UIntPtr.Zero);
-                }
+                Native.ForceForeground(hwnd);
                 ForceForeground = false;
             }
             Activate();
@@ -305,7 +266,14 @@ namespace PrismDock
     static class SysStats
     {
         static long pi, pk, pu;
+        static double lastCpu; static int lastCpuTick;
         public static double Cpu()
+        {
+            if (lastCpuTick != 0 && Environment.TickCount - lastCpuTick < 1500) return lastCpu;   // shared by every dock
+            lastCpuTick = Environment.TickCount;
+            return lastCpu = CpuNow();
+        }
+        static double CpuNow()
         {
             long i, k, u;
             if (!Native.GetSystemTimes(out i, out k, out u)) return 0;
@@ -609,6 +577,7 @@ namespace PrismDock
             rp.Children.Add(Label("DAVRANIŞ"));
             var tg = new StackPanel();
             tg.Children.Add(ToggleRow("Dinamik ada (üstte saat)", S.Island, v => S.Island = v));
+            tg.Children.Add(ToggleRow("Adayı tüm monitörlerde göster", S.AllMonitors, v => S.AllMonitors = v));
             tg.Children.Add(ToggleRow("Dock'u otomatik gizle (ada ile aç)", S.AutoHide, v => S.AutoHide = v));
             tg.Children.Add(ToggleRow("Win tuşu PrismDock menüsünü açsın", S.WinKeyMenu, v => S.WinKeyMenu = v));
             tg.Children.Add(ToggleRow("Arama kısayolu  (Alt + Boşluk)", S.SearchHotkey, v => S.SearchHotkey = v));

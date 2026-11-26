@@ -24,11 +24,26 @@ namespace PrismDock
             if (ui == null) ui = Dispatcher.CurrentDispatcher;
             wanted = on; dock = dockHwnd;
             if (releaseEvt == null) releaseEvt = new EventWaitHandle(false, EventResetMode.AutoReset, ReleaseName(Process.GetCurrentProcess().Id));
+            if (rehookEvt == null) rehookEvt = new EventWaitHandle(false, EventResetMode.AutoReset, RehookName(Process.GetCurrentProcess().Id));
             if (on && (helper == null || helper.HasExited)) StartHelper();
             else if (!on) StopHelper();
         }
 
         static string ReleaseName(int pid) { return "PrismDock_KeyRelease_" + pid; }
+        static string RehookName(int pid) { return "PrismDock_KeyRehook_" + pid; }
+        static EventWaitHandle rehookEvt;
+        static DateTime lastRehook;
+        public static DateTime LastTap = DateTime.MinValue;
+        public static DateTime OwnStartUntil = DateTime.MinValue;
+
+        /// Windows' own Start appeared although the user didn't ask for it: our hook was bypassed -> re-hook now
+        public static void Bypassed()
+        {
+            if ((DateTime.Now - lastRehook).TotalSeconds < 5 || DateTime.Now < OwnStartUntil) return;
+            lastRehook = DateTime.Now;
+            EventLog.Write("Windows Start opened without our hook -> re-hooking");
+            try { if (rehookEvt != null) rehookEvt.Set(); } catch { }
+        }
 
         static void StartHelper()
         {
@@ -65,7 +80,7 @@ namespace PrismDock
         public static void Release() { try { if (releaseEvt != null) releaseEvt.Set(); } catch { } }
 
         /// opens the real Windows Start menu (injected, so the hook ignores it)
-        public static void OpenWindowsStart() { Native.Keys(0x5B); }
+        public static void OpenWindowsStart() { OwnStartUntil = DateTime.Now.AddSeconds(3); Native.Keys(0x5B); }
 
         // =====================================================================================================
         // helper process
@@ -122,10 +137,19 @@ namespace PrismDock
             rw.Start();
 
             Hook();
-            SetTimer(IntPtr.Zero, UIntPtr.Zero, 30000, IntPtr.Zero);   // periodic re-hook: Windows may drop a hook silently
+            SetTimer(IntPtr.Zero, UIntPtr.Zero, 10000, IntPtr.Zero);   // periodic re-hook: Windows may drop a hook silently
+            // the dock asks for an immediate re-hook when Windows' own Start menu appeared (= our hook was bypassed)
+            var hw = new Thread(() =>
+            {
+                EventWaitHandle ev;
+                if (!EventWaitHandle.TryOpenExisting(RehookName(parent), out ev)) return;
+                while (true) { ev.WaitOne(); PostThreadMessage(me, 0x8001 /*WM_APP+1*/, IntPtr.Zero, IntPtr.Zero); }
+            }) { IsBackground = true };
+            hw.Start();
             MSG m;
             while (GetMessage(out m, IntPtr.Zero, 0, 0) > 0)
             {
+                if (m.message == 0x8001) { Hook(); continue; }
                 if (m.message == 0x113 /*WM_TIMER*/)
                 {
                     if (!winDown) Hook();

@@ -22,6 +22,8 @@ namespace PrismDock
         public string Text = "", Exe = "", Name = "";
         public bool Promoted;          // in the always-visible part of the Windows notification area
         public bool System;            // owned by explorer (network, volume, bluetooth ...): can't be closed
+        public bool FromRegistry;      // Windows 11: known from NotifyIconSettings, no message channel to the icon
+        public List<uint> AllPids = new List<uint>();
         public ImageSource Icon;
         public string Key { get { return Hwnd.ToInt64() + ":" + Uid; } }
     }
@@ -49,7 +51,14 @@ namespace PrismDock
 
         public static bool Supported
         {
-            get { return IntPtr.Size == 8 && Toolbar(false) != IntPtr.Zero; }
+            get { return (IntPtr.Size == 8 && Toolbar(false) != IntPtr.Zero) || RegistryPath() != null; }
+        }
+
+        /// Windows 11 keeps every notification icon it has seen under this key (exe path, pinned, icon snapshot)
+        static string RegistryPath()
+        {
+            const string p = @"Control Panel\NotifyIconSettings";
+            try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(p)) return k != null ? p : null; } catch { return null; }
         }
 
         public static void Start(Dispatcher d)
@@ -73,13 +82,18 @@ namespace PrismDock
                 try
                 {
                     var list = new List<TrayIcon>();
-                    Read(Toolbar(false), true, list);
-                    Read(Toolbar(true), false, list);
-                    string sig = string.Join("|", list.Select(i => i.Key + "/" + i.HIcon.ToInt64() + "/" + i.Text));
+                    IntPtr tb = Toolbar(false);
+                    if (tb != IntPtr.Zero)
+                    {
+                        Read(tb, true, list);
+                        Read(Toolbar(true), false, list);
+                    }
+                    else ReadRegistry(list);
+                    string sig = string.Join("|", list.Select(i => i.Key + "/" + i.HIcon.ToInt64() + "/" + i.Text + "/" + i.Pid));
                     if (sig != lastSig)
                     {
                         lastSig = sig;
-                        foreach (var i in list) i.Icon = IconFor(i.HIcon);
+                        foreach (var i in list) if (i.Icon == null) i.Icon = IconFor(i.HIcon);
                         ui.BeginInvoke(new Action(() => { Items = list; if (Changed != null) Changed(); }));
                     }
                 }
@@ -157,8 +171,139 @@ namespace PrismDock
             finally { VirtualFreeEx(hp, mem, IntPtr.Zero, 0x8000); Native.CloseHandle(hp); }
         }
 
+        // ------------------------------------------------------------ Windows 11
+        static readonly Dictionary<string, ImageSource> regIcons = new Dictionary<string, ImageSource>(StringComparer.OrdinalIgnoreCase);
+        [DllImport("shell32.dll")] static extern int SHGetKnownFolderPath(ref Guid id, uint flags, IntPtr token, out IntPtr path);
+
+        /// "{F38BF404-...}\\notepad.exe" -> "C:\\Windows\\notepad.exe"
+        static string ResolveKnownFolder(string p)
+        {
+            if (string.IsNullOrEmpty(p) || p[0] != '{') return p;
+            int end = p.IndexOf('}');
+            Guid g;
+            if (end < 0 || !Guid.TryParse(p.Substring(0, end + 1), out g)) return p;
+            IntPtr s;
+            if (SHGetKnownFolderPath(ref g, 0, IntPtr.Zero, out s) != 0) return p;
+            try { return Marshal.PtrToStringUni(s) + p.Substring(end + 1); } finally { Marshal.FreeCoTaskMem(s); }
+        }
+
+        /// running apps that own a notification icon: registry entries whose exe is currently running
+        static void ReadRegistry(List<TrayIcon> list)
+        {
+            string key = RegistryPath();
+            if (key == null) return;
+            // exe path -> pids (one pass over the processes)
+            var running = new Dictionary<string, List<uint>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pr in Process.GetProcesses())
+            {
+                try
+                {
+                    uint pid = (uint)pr.Id;
+                    if (pid == ownPid || pid <= 4) continue;
+                    string path = Native.GetProcessPath(pid);
+                    if (string.IsNullOrEmpty(path)) continue;
+                    List<uint> l;
+                    if (!running.TryGetValue(path, out l)) running[path] = l = new List<uint>();
+                    l.Add(pid);
+                }
+                catch { }
+                finally { pr.Dispose(); }
+            }
+            string win = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            using (var root = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(key))
+            {
+                if (root == null) return;
+                foreach (var name in root.GetSubKeyNames())
+                {
+                    try
+                    {
+                        using (var k = root.OpenSubKey(name))
+                        {
+                            if (k == null) continue;
+                            string exe = ResolveKnownFolder(k.GetValue("ExecutablePath") as string);
+                            List<uint> pids;
+                            if (string.IsNullOrEmpty(exe) || !running.TryGetValue(exe, out pids)) continue;
+                            if (list.Any(x => x.Exe.Equals(exe, StringComparison.OrdinalIgnoreCase))) continue;   // one row per app
+                            string tip = (k.GetValue("InitialTooltip") as string ?? "").Trim();
+                            object prom = k.GetValue("IsPromoted");
+                            var ic = new TrayIcon
+                            {
+                                FromRegistry = true, Exe = exe, Pid = pids[0], AllPids = pids, Text = tip,
+                                Promoted = prom is int && (int)prom != 0,
+                                System = exe.StartsWith(win, StringComparison.OrdinalIgnoreCase),
+                                Hwnd = IntPtr.Zero, Uid = (uint)name.GetHashCode()
+                            };
+                            ic.Name = DockApp.Describe(exe);
+                            string first = tip.Split('\n')[0].Trim();
+                            if (first.Length > 0 && first.Length <= 40 && ic.Name.Equals(Path.GetFileNameWithoutExtension(exe), StringComparison.OrdinalIgnoreCase)) ic.Name = first;
+                            ic.Icon = RegIcon(exe, k.GetValue("IconSnapShot") as byte[]);
+                            list.Add(ic);
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        static ImageSource RegIcon(string exe, byte[] snapshot)
+        {
+            ImageSource img;
+            lock (gate) { if (regIcons.TryGetValue(exe, out img)) return img; }
+            try
+            {
+                if (snapshot != null && snapshot.Length > 0)
+                {
+                    var bi = new BitmapImage();
+                    bi.BeginInit(); bi.CacheOption = BitmapCacheOption.OnLoad; bi.StreamSource = new MemoryStream(snapshot); bi.EndInit();
+                    bi.Freeze(); img = bi;
+                }
+            }
+            catch { img = null; }
+            if (img == null)
+            {
+                try
+                {
+                    using (var ico = System.Drawing.Icon.ExtractAssociatedIcon(exe))
+                    {
+                        var bs = Imaging.CreateBitmapSourceFromHIcon(ico.Handle, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+                        bs.Freeze(); img = bs;
+                    }
+                }
+                catch { img = null; }
+            }
+            lock (gate) { regIcons[exe] = img; }
+            return img;
+        }
+
+        /// no message channel to the icon (Windows 11): bring the app's own window back, or ask the app to show itself
+        static void OpenApp(TrayIcon i)
+        {
+            IntPtr best = IntPtr.Zero;
+            var pids = new HashSet<uint>(i.AllPids);
+            Native.EnumWindows((h, l) =>
+            {
+                uint pid; Native.GetWindowThreadProcessId(h, out pid);
+                if (!pids.Contains(pid) || Native.GetWindow(h, 4 /*GW_OWNER*/) != IntPtr.Zero) return true;
+                if (Native.GetWindowTextLength(h) == 0) return true;
+                long ex = (uint)Native.GetWindowLong(h, -20);
+                if ((ex & 0x80) != 0) return true;            // WS_EX_TOOLWINDOW
+                long st = (uint)Native.GetWindowLong(h, -16);
+                if ((st & 0x00C00000) != 0x00C00000) return true; // needs a caption: skips message-only / helper windows
+                best = h; return false;
+            }, IntPtr.Zero);
+            if (best != IntPtr.Zero)
+            {
+                Native.ShowWindow(best, Native.IsIconic(best) ? 9 /*SW_RESTORE*/ : 5 /*SW_SHOW*/);
+                Native.ForceForeground(best);
+                return;
+            }
+            // most tray apps are single-instance: starting them again shows their window (Discord, Steam, Spotify ...)
+            try { Process.Start(new ProcessStartInfo(i.Exe) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(i.Exe) }); } catch { }
+        }
+
         static void Forget(TrayIcon ic)
         {
+            if (ic.FromRegistry) return;
             try
             {
                 var d = new NOTIFYICONDATA { cbSize = Marshal.SizeOf(typeof(NOTIFYICONDATA)), hWnd = ic.Hwnd, uID = ic.Uid };
@@ -196,6 +341,7 @@ namespace PrismDock
         /// screen point (px) is the anchor for version-4 apps (where they place flyouts / menus)
         public static void Click(TrayIcon i, Point anchorPx, bool right, bool dbl)
         {
+            if (i.FromRegistry) { AllowSetForegroundWindow(i.Pid); OpenApp(i); return; }
             if (!Native.IsWindow(i.Hwnd)) { Refresh(); return; }
             AllowSetForegroundWindow(i.Pid);   // lets the app bring its window / menu to the front
             int x = (int)anchorPx.X, y = (int)anchorPx.Y;
@@ -221,7 +367,8 @@ namespace PrismDock
             if (i.System || i.Pid == 0 || i.Pid == ownPid) return false;
             try
             {
-                var psi = new ProcessStartInfo("taskkill.exe", "/PID " + i.Pid + " /T /F") { CreateNoWindow = true, UseShellExecute = false };
+                var pids = i.AllPids.Count > 0 ? i.AllPids : new List<uint> { i.Pid };
+                var psi = new ProcessStartInfo("taskkill.exe", string.Join(" ", pids.Select(p => "/PID " + p)) + " /T /F") { CreateNoWindow = true, UseShellExecute = false };
                 using (var p = Process.Start(psi)) p.WaitForExit(4000);
             }
             catch { try { using (var p = Process.GetProcessById((int)i.Pid)) p.Kill(); } catch { return false; } }
@@ -257,7 +404,7 @@ namespace PrismDock
             list = new StackPanel();
             var sv = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Hidden, Focusable = false };
             Grid.SetRow(sv, 1); g.Children.Add(sv);
-            var foot = Ui.Text("Tıkla: aç  ·  Sağ tık: uygulamanın menüsü  ·  ✕: kapat", 11, FontWeights.Normal, Ui.Br(t.Sub));
+            var foot = Ui.Text(Tray.Items.Any(x => x.FromRegistry) ? "Tıkla: aç  ·  ✕: kapat" : "Tıkla: aç  ·  Sağ tık: uygulamanın menüsü  ·  ✕: kapat", 11, FontWeights.Normal, Ui.Br(t.Sub));
             foot.Margin = new Thickness(2, 10, 0, 0); foot.Opacity = 0.85;
             Grid.SetRow(foot, 2); g.Children.Add(foot);
             Fill();
@@ -288,7 +435,8 @@ namespace PrismDock
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(44) });
             g.ColumnDefinitions.Add(new ColumnDefinition());
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var img = new Image { Width = 22, Height = 22, Source = i.Icon ?? Icons.ForPath(i.Exe, 32) };
+            var img = new Image { Width = 22, Height = 22, Source = i.Icon };
+            if (i.Icon == null) { string exe = i.Exe; Icons.Async(Dispatcher, () => Icons.ForPath(exe, 32), x => img.Source = x); }
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
             g.Children.Add(img);
             var texts = new StackPanel { VerticalAlignment = VerticalAlignment.Center };

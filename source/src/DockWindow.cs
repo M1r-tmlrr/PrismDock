@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -37,13 +37,26 @@ namespace PrismDock
         Int32Rect lastRgn = new Int32Rect(-1, -1, -1, -1);
         const int HotkeyId = 0x5D01;
 
-        CalendarPanel cal; SystemPanel sys; NotesPanel notes; PomodoroPanel pomo; SettingsPanel settingsP; SearchWindow search; AppPickerPanel picker; StartPanel startP; TrayPanel trayP; KeyboardPanel kbdP;
+        // panels are shared by the docks of all monitors (one copy in memory); each opens next to the dock that asked
+        static CalendarPanel cal; static SystemPanel sys; static NotesPanel notes; static PomodoroPanel pomo; static SettingsPanel settingsP; static SearchWindow search; static AppPickerPanel picker; static StartPanel startP; static TrayPanel trayP; static KeyboardPanel kbdP;
+        public readonly bool Primary;
+        string device;
+        Rect mon, work;
+        public string Device { get { return device; } }
+        double MonCenter { get { return mon.X + mon.Width / 2; } }
         TextBlock kbdText; ScaleTransform kbdSc; Spring kbdS;
         StackPanel trayInline;
         IEnumerable<PanelWindow> Panels { get { return new PanelWindow[] { cal, sys, notes, pomo, settingsP, search, picker, startP, trayP, kbdP }.Where(p => p != null); } }
 
-        public DockWindow()
+        public DockWindow() : this(null) { }
+
+        /// screen == null: the primary dock (owns hooks, hotkeys, island, taskbar). Otherwise a dock for that monitor.
+        public DockWindow(System.Windows.Forms.Screen screen)
         {
+            Primary = screen == null;
+            device = (screen ?? System.Windows.Forms.Screen.PrimaryScreen).DeviceName;
+            UpdateMonitor();
+            App.Docks.Add(this);
             WindowStyle = WindowStyle.None; AllowsTransparency = false; ResizeMode = ResizeMode.NoResize; ShowInTaskbar = false; Topmost = true;
             ShowActivated = false; Background = Brushes.Transparent; AllowDrop = true; FontFamily = Ui.TextFont;
             Title = "PrismDock";
@@ -56,10 +69,13 @@ namespace PrismDock
             refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(140) };
             refreshTimer.Tick += (s, e) => { refreshTimer.Stop(); Refresh(); };
             slowTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(15) };
-            slowTimer.Tick += (s, e) => { Refresh(); if (App.S.HideTaskbar) Taskbar.Enforce(); ReapPanels(); };
-            var enforce = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
-            enforce.Tick += (s, e) => { if (App.S.HideTaskbar) Taskbar.Enforce(); };
-            enforce.Start();
+            slowTimer.Tick += (s, e) => { Refresh(); if (Primary) { if (App.S.HideTaskbar) Taskbar.Enforce(); ReapPanels(); } };
+            if (Primary)
+            {
+                var enforce = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(2) };
+                enforce.Tick += (s, e) => { if (App.S.HideTaskbar) Taskbar.Enforce(); };
+                enforce.Start();
+            }
             clockTimer = new DispatcherTimer();
             clockTimer.Tick += (s, e) => UpdateClock();
             statTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromSeconds(3) };
@@ -76,10 +92,9 @@ namespace PrismDock
             autoTimer.Tick += (s, e) => AutoHideTick();
 
             Pomodoro.Changed += UpdatePomo;
-            Pomodoro.Finished += () => { if (pomoWidget != null) Pulse(pomoWidget); };
+            Pomodoro.Finished += OnPomoFinished;
             Media.Changed += UpdateMedia;
             KeyLayout.Changed += UpdateKbd;
-            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => Dispatcher.BeginInvoke(new Action(() => { Layout(); }), DispatcherPriority.Background);
 
             LoadPins();
             Build();
@@ -94,62 +109,63 @@ namespace PrismDock
             Glass.SetupDwm(this, hwnd);
             Glass.ClipTo(hwnd, Rect.Empty, 0, scale, ref lastRgn);
             HwndSource.FromHwnd(hwnd).AddHook(WndProc);
-            shellMsg = Native.RegisterWindowMessage("SHELLHOOK");
-            taskbarCreatedMsg = Native.RegisterWindowMessage("TaskbarCreated");
-            Native.RegisterShellHookWindow(hwnd);
-            winProc = OnWinEvent;
-            hookFg = Native.SetWinEventHook(3, 3, IntPtr.Zero, winProc, 0, 0, 0);          // EVENT_SYSTEM_FOREGROUND
-            hookMin = Native.SetWinEventHook(0x16, 0x17, IntPtr.Zero, winProc, 0, 0, 0);   // MINIMIZESTART/END
-            host = new BackdropHost(this, false);
+            if (Primary)
+            {
+                // system-wide hooks exist once; the docks on other monitors are fed by this one
+                shellMsg = Native.RegisterWindowMessage("SHELLHOOK");
+                taskbarCreatedMsg = Native.RegisterWindowMessage("TaskbarCreated");
+                Native.RegisterShellHookWindow(hwnd);
+                winProc = OnWinEvent;
+                hookFg = Native.SetWinEventHook(3, 3, IntPtr.Zero, winProc, 0, 0, 0);          // EVENT_SYSTEM_FOREGROUND
+                hookMin = Native.SetWinEventHook(0x16, 0x17, IntPtr.Zero, winProc, 0, 0, 0);   // MINIMIZESTART/END
+            }
+            host = new BackdropHost(this, false) { Slow = !Primary };
             AttachGlass();
             Layout();
             Refresh();
             slowTimer.Start();
             UpdateClock(); UpdateStats(); statTimer.Start();
+            Tray.Changed += FillTray;
+            Entrance();
+            if (!Primary) return;
             KeyLayout.Start(Dispatcher);
             ApplyHotkey();
-            Tray.Changed += FillTray;
             var later = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1200) };
             later.Tick += (s2, e2) => { later.Stop(); Media.Init(Dispatcher); Tray.Start(Dispatcher); };
             later.Start();
             // explorer re-showing its taskbar (Windows 11 does this) is caught the moment it happens
             HookExplorerShow();
-            Entrance();
             WatchForeground(Native.GetForegroundWindow());
             // warm the app catalog for search / picker in the background
             var warm = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
             warm.Tick += (s, e2) =>
             {
                 warm.Stop(); AppCatalog.Load(Dispatcher);
-                string open = Environment.GetEnvironmentVariable("PRISM_OPEN"); // dev: preview a panel without input
-                if (open == "search") OpenSearch();
-                else if (open == "picker") OpenAppPicker();
-                else if (open == "settings") OpenSettings();
-                else if (open == "keyboard") { var k = kbdP ?? (kbdP = new KeyboardPanel()); k.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top); }
-                else if (open == "calendar") { var c = cal ?? (cal = new CalendarPanel()); c.OpenAt(SystemParameters.PrimaryScreenWidth - 200, Edge, App.S.Top); }
-                if (Environment.GetEnvironmentVariable("PRISM_BENCH") != null) Bench();
-                if (Environment.GetEnvironmentVariable("PRISM_DRAGTEST") != null) DragTest();
-                if (Environment.GetEnvironmentVariable("PRISM_PREVIEWTEST") != null)
-                {
-                    // dev: open the preview of the app with the most windows for 4 s (no input)
-                    ShowDock();
-                    var t0 = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
-                    t0.Tick += (o, e3) =>
-                    {
-                        t0.Stop();
-                        var v = DockIcons().OrderByDescending(i => i.App.Wins.Count).FirstOrDefault();
-                        if (v == null || v.App.Wins.Count == 0) return;
-                        ShowPreview(v);
-                        EventLog.Write("previewtest: " + v.App.Name + " x" + v.App.Wins.Count);
-                        var t1 = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
-                        t1.Tick += (o2, e4) => { t1.Stop(); HidePreview(); };
-                        t1.Start();
-                    };
-                    t0.Start();
-                }
-                if (open != null && open.StartsWith("search:")) { OpenSearch(); search.DebugQuery(open.Substring(7)); }
             };
             warm.Start();
+        }
+
+        void OnPomoFinished() { if (pomoWidget != null) Pulse(pomoWidget); }
+
+        public void UpdateMonitor()
+        {
+            var scr = Primary ? System.Windows.Forms.Screen.PrimaryScreen : Mon.Find(device);
+            if (scr == null) return;
+            mon = Mon.Dip(scr.Bounds); work = Mon.Dip(scr.WorkingArea);
+        }
+
+        public void Relayout() { UpdateMonitor(); Layout(); }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            // a monitor went away: drop everything this dock subscribed to
+            App.Docks.Remove(this);
+            Pomodoro.Changed -= UpdatePomo; Pomodoro.Finished -= OnPomoFinished; Media.Changed -= UpdateMedia; KeyLayout.Changed -= UpdateKbd; Tray.Changed -= FillTray;
+            foreach (var t in new[] { refreshTimer, slowTimer, clockTimer, statTimer, autoTimer }) if (t != null) t.Stop();
+            entrance.OnSettle = null;
+            if (host != null) { host.Stop(); host.Clear(); }
+            if (preview != null) { preview.Close(); preview = null; }
+            base.OnClosed(e);
         }
 
         void AttachGlass()
@@ -177,7 +193,7 @@ namespace PrismDock
 
         public void ApplyHotkey()
         {
-            if (hwnd == IntPtr.Zero) return;
+            if (hwnd == IntPtr.Zero || !Primary) return;
             Native.UnregisterHotKey(hwnd, HotkeyId);
             if (App.S.SearchHotkey) Native.RegisterHotKey(hwnd, HotkeyId, 0x1 | 0x4000, 0x20); // Alt + Space, no repeat
             WinKeyHook.Enable(App.S.WinKeyMenu, hwnd);
@@ -193,17 +209,30 @@ namespace PrismDock
         void Layout()
         {
             var s = App.S;
-            double sw = SystemParameters.PrimaryScreenWidth, sh = SystemParameters.PrimaryScreenHeight;
-            Left = 0; Width = sw; Height = winH;
-            if (!s.FullWidth && targetW > 0) { double want = Math.Min(sw, Math.Ceiling(targetW * 1.04 + margin * 2 + 8)); Left = Math.Round((sw - want) / 2); Width = want; }
-            if (s.HideTaskbar) Top = s.Top ? 0 : sh - winH;
-            else { var wa = SystemParameters.WorkArea; Top = s.Top ? wa.Top : wa.Bottom - winH; }
+            double sw = mon.Width;
+            Left = mon.X; Width = sw; Height = winH;
+            if (!s.FullWidth && targetW > 0) { double want = Math.Min(sw, Math.Ceiling(targetW * 1.04 + margin * 2 + 8)); Left = mon.X + Math.Round((sw - want) / 2); Width = want; }
+            if (s.HideTaskbar) Top = s.Top ? mon.Top : mon.Bottom - winH;
+            else Top = s.Top ? work.Top : work.Bottom - winH;
             if (hwnd == IntPtr.Zero) return;
-            if (s.Reserve && s.HideTaskbar && !AutoHiding) Taskbar.Reserve(hwnd, s.Top, (int)Math.Round(winH * scale));
-            else Taskbar.Unreserve(hwnd);
+            if (Primary)
+            {
+                if (s.Reserve && s.HideTaskbar && !AutoHiding) Taskbar.Reserve(hwnd, s.Top, (int)Math.Round(winH * scale));
+                else Taskbar.Unreserve(hwnd);
+            }
             // make sure we really are where we want after appbar negotiation
             Native.SetWindowPos(hwnd, (IntPtr)(-1), (int)Math.Round(Left * scale), (int)Math.Round(Top * scale), (int)Math.Round(Width * scale), (int)Math.Round(winH * scale), 0x10);
             Dispatcher.BeginInvoke(new Action(() => { if (host != null) host.Configure(); UpdateRegion(); }), DispatcherPriority.Loaded);
+        }
+
+        /// pins changed on another monitor's dock: take the same list
+        public void ReloadPins()
+        {
+            HidePreview();
+            apps.Clear();
+            LoadPins();
+            Rebuild();
+            Refresh();
         }
 
         public void Rebuild()
@@ -226,10 +255,10 @@ namespace PrismDock
         /// panels that have stayed closed for 2 minutes are destroyed (window + GPU surfaces); they rebuild on demand
         void ReapPanels()
         {
+            foreach (var d in App.Docks) if (d.preview != null && d.preview.Stale) { d.preview.Close(); d.preview = null; Memory.Soon(); }
             int before = Panels.Count();
             cal = Reap(cal); sys = Reap(sys); notes = Reap(notes); pomo = Reap(pomo); settingsP = Reap(settingsP);
             search = Reap(search); picker = Reap(picker); startP = Reap(startP); trayP = Reap(trayP);
-            if (preview != null && preview.Stale) { preview.Close(); preview = null; before++; }
             if (Panels.Count() != before) Memory.Soon();
         }
 
@@ -326,10 +355,10 @@ namespace PrismDock
         void FitWindow()
         {
             if (App.S.FullWidth || targetW <= 0) return;
-            double sw = SystemParameters.PrimaryScreenWidth;
+            double sw = mon.Width;
             double want = Math.Min(sw, Math.Ceiling(targetW * 1.04 + margin * 2 + 8));
             if (Math.Abs(want - Width) < 1) return;
-            Left = Math.Round((sw - want) / 2);
+            Left = mon.X + Math.Round((sw - want) / 2);
             Width = want;
             Dispatcher.BeginInvoke(new Action(() => { if (host != null) host.Configure(); UpdateRegion(); }), DispatcherPriority.Loaded);
         }
@@ -352,26 +381,30 @@ namespace PrismDock
         }
 
         // fullscreen must be seen on 2 consecutive checks (~0.5 s) before anything moves: no hide/show flicker
-        int fsVotes; bool fsWant;
+        // the monitor that currently shows a fullscreen app ("" = none); only that monitor's dock hides
+        int fsVotes; string fsWant = "", fsCur = "";
+
         void FsVote(IntPtr h)
         {
-            bool fs = Tracker.IsFullscreen(h);
-            if (fs != fsWant) { fsWant = fs; fsVotes = 0; }
-            if (fs == hiddenFs) { fsVotes = 0; return; }
+            string dev = Tracker.IsFullscreen(h) ? System.Windows.Forms.Screen.FromHandle(h).DeviceName : "";
+            if (dev != fsWant) { fsWant = dev; fsVotes = 0; }
+            if (dev == fsCur) { fsVotes = 0; return; }
             if (++fsVotes < 2) return;
             fsVotes = 0;
-            EventLog.Write("fullscreen " + (fs ? "ON  " : "OFF ") + EventLog.Describe(h));
-            SetFullscreen(fs);
+            fsCur = dev;
+            EventLog.Write("fullscreen " + (dev.Length > 0 ? "ON  " + dev + " " : "OFF ") + EventLog.Describe(h));
+            foreach (var d in App.Docks.ToList()) d.SetFullscreen(dev.Length > 0 && d.device == dev);
+            foreach (var i in App.Islands.ToList()) if (!i.Primary) i.SetHidden(dev.Length > 0 && i.Device == dev);
         }
 
-        void SetFullscreen(bool fs)
+        public void SetFullscreen(bool fs)
         {
             Diag.Hit("fs" + (fs ? 1 : 0));
             if (fs == hiddenFs) return;
             hiddenFs = fs;
             // fullscreen (video, game): the dock sinks away with its own animation, the island stays and
             // collapses to the PrismDock mark. Leaving fullscreen brings back time/date and the dock.
-            if (App.Island != null) App.Island.SetHidden(fs);
+            if (Primary && App.Island != null) App.Island.SetHidden(fs);
             if (fs) { fsHid = !autoHidden; HideDock(); }
             else { if (fsHid || !AutoHiding) ShowDock(); fsHid = false; }
         }
@@ -385,23 +418,6 @@ namespace PrismDock
             var a = new DoubleAnimation(1, 1.2, TimeSpan.FromMilliseconds(260)) { AutoReverse = true, RepeatBehavior = new RepeatBehavior(4), EasingFunction = Ui.InOut };
             sc.BeginAnimation(ScaleTransform.ScaleXProperty, a);
             sc.BeginAnimation(ScaleTransform.ScaleYProperty, a);
-        }
-
-        void Bench()
-        {
-            ShowDock();
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            var t = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(8) };
-            t.Tick += (o, e) =>
-            {
-                double sec = sw.Elapsed.TotalSeconds;
-                if (sec > 12) { t.Stop(); foreach (var a in apps) if (a.View != null) a.View.SetMagnify(1); Diag.Hit("benchEnd"); return; }
-                if (sec < 2) return;
-                double x0 = appsPanel.TranslatePoint(new Point(0, 0), surf).X, w = appsPanel.ActualWidth;
-                MagnifyAt(x0 + w * (0.5 - 0.5 * Math.Cos((sec - 2) * 2.2)));
-                RestartAutoHide();
-            };
-            t.Start();
         }
 
         void OnMouseMove(object sender, MouseEventArgs e)
@@ -611,7 +627,8 @@ namespace PrismDock
             foreach (var i in Tray.Items.Where(x => x.Promoted).Take(6))
             {
                 var ic = i;
-                var img = new Image { Width = Math.Round(S * 0.42), Height = Math.Round(S * 0.42), Source = ic.Icon ?? Icons.ForPath(ic.Exe, 32) };
+                var img = new Image { Width = Math.Round(S * 0.42), Height = Math.Round(S * 0.42), Source = ic.Icon };
+                if (ic.Icon == null) { string exe = ic.Exe; Icons.Async(Dispatcher, () => Icons.ForPath(exe, 32), x => img.Source = x); }
                 RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
                 Border b = null;
                 b = Ui.Button(img, () => Tray.Click(ic, Center(b), false, false), ic.Text.Length > 0 ? ic.Text : ic.Name, S * 0.7, S * 0.82, S * 0.35);
@@ -736,12 +753,13 @@ namespace PrismDock
             foreach (var o in Panels) if (o != p && o.IsOpen) o.CloseAnimated();
             RestartAutoHide();
             Point pt = anchor.PointToScreen(new Point(anchor.ActualWidth / 2, 0));
+            p.AnchorDock = this;
             p.OpenAt(pt.X / scale, Edge, App.S.Top);
         }
 
         double Edge { get { return App.S.Top ? Top + margin + pillH : Top + margin; } }
 
-        public void OpenSettings() { var p = settingsP ?? (settingsP = new SettingsPanel()); if (!p.IsOpen) p.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top); }
+        public void OpenSettings() { var p = settingsP ?? (settingsP = new SettingsPanel()); if (!p.IsOpen) { p.AnchorDock = this; p.OpenAt(MonCenter, Edge, App.S.Top); } }
 
         /// open the search with text already typed (start panel hand-off); if it is open, just add the text
         public void OpenSearch(string q)
@@ -750,7 +768,8 @@ namespace PrismDock
             if (p.IsOpen) { p.Append(q); return; }
             p.Pending = q;
             foreach (var o in Panels) if (o != p && o.IsOpen && !(o is StartPanel)) o.CloseAnimated();
-            p.OpenCentered();
+            p.AnchorDock = this;
+            p.OpenCentered(mon);
         }
 
         public void AppendSearch(string q) { if (search != null && search.IsOpen) search.Append(q); else OpenSearch(q); }
@@ -762,7 +781,8 @@ namespace PrismDock
             if ((DateTime.Now - p.ClosedAt).TotalMilliseconds < 250) return;
             foreach (var o in Panels) if (o != p && o.IsOpen) o.CloseAnimated();
             p.ForceForeground = fromKey;
-            p.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top);
+            p.AnchorDock = this;
+            p.OpenAt(MonCenter, Edge, App.S.Top);
             RestartAutoHide();
         }
 
@@ -770,6 +790,7 @@ namespace PrismDock
         bool AutoHiding { get { return App.S.Island && App.S.AutoHide; } }
         public bool DockVisible { get { return !autoHidden; } }
         public bool FullscreenActive { get { return hiddenFs; } }
+        public bool FullscreenOn(string dev) { return fsCur.Length > 0 && fsCur == dev; }
 
         void RestartAutoHide()
         {
@@ -780,22 +801,27 @@ namespace PrismDock
         void AutoHideTick()
         {
             if (!(AutoHiding || hiddenFs) || autoHidden) { autoTimer.Stop(); return; }
-            bool busy = IsMouseOver || Panels.Any(p => p.IsOpen) || (preview != null && preview.IsShown);
+            bool busy = IsMouseOver || Panels.Any(p => p.IsOpen && p.AnchorDock == this) || (preview != null && preview.IsShown);
             if (busy) { RestartAutoHide(); return; }
             HideDock();
         }
 
         public void RefreshFocus() { }
 
-        public void ToggleDock() { if (autoHidden) ShowDock(); else HideDock(); }
+        /// island click: every monitor's dock follows the primary one
+        public void ToggleDock()
+        {
+            bool show = autoHidden;
+            foreach (var d in App.Docks.ToList()) { if (show) d.ShowDock(); else d.HideDock(); }
+        }
 
         public void ShowDock()
         {
-            if (App.Island != null) App.Island.Nudge();
+            if (Primary && App.Island != null) App.Island.Nudge();
             if (!autoHidden) { RestartAutoHide(); return; }
             autoHidden = false;
             Native.ShowWindow(hwnd, Native.SW_SHOWNA);
-            statTimer.Start(); UpdateStats(); Tray.Pause(false);
+            statTimer.Start(); UpdateStats(); if (Primary) Tray.Pause(false);
             entrance.OnSettle = null;
             if (host != null) host.Start();
             entrance.To(0, 210, 0.74);
@@ -809,10 +835,10 @@ namespace PrismDock
             autoHidden = true;
             autoTimer.Stop();
             HidePreview();
-            foreach (var o in Panels) if (o.IsOpen) o.CloseAnimated();
-            if (App.Island != null) App.Island.Nudge();
+            foreach (var o in Panels) if (o.IsOpen && (o.AnchorDock == this || o.AnchorDock == null)) o.CloseAnimated();
+            if (Primary && App.Island != null) App.Island.Nudge();
             foreach (var a in apps) if (a.View != null) a.View.SetMagnify(1);
-            entrance.OnSettle = () => { if (autoHidden) { Native.ShowWindow(hwnd, Native.SW_HIDE); statTimer.Stop(); if (host != null) host.Stop(); Tray.Pause(true); Memory.Soon(); } };
+            entrance.OnSettle = () => { if (autoHidden) { Native.ShowWindow(hwnd, Native.SW_HIDE); statTimer.Stop(); if (host != null) host.Stop(); if (Primary) Tray.Pause(true); Memory.Soon(); } };
             entrance.To((App.S.Top ? -1 : 1) * (winH + 6), 140, 0.9);
         }
 
@@ -822,7 +848,8 @@ namespace PrismDock
             if (p.IsOpen) { p.CloseAnimated(); return; }
             if ((DateTime.Now - p.ClosedAt).TotalMilliseconds < 250) return;
             foreach (var o in Panels) if (o != p && o.IsOpen) o.CloseAnimated();
-            p.OpenCentered();
+            p.AnchorDock = this;
+            p.OpenCentered(mon);
         }
 
         public void OpenAppPicker()
@@ -830,7 +857,8 @@ namespace PrismDock
             var p = picker ?? (picker = new AppPickerPanel());
             if (p.IsOpen) return;
             foreach (var o in Panels) if (o != p && o.IsOpen) o.CloseAnimated();
-            p.OpenAt(SystemParameters.PrimaryScreenWidth / 2, Edge, App.S.Top);
+            p.AnchorDock = this;
+            p.OpenAt(MonCenter, Edge, App.S.Top);
         }
 
         // ---------------------------------------------------------------- apps
@@ -866,42 +894,6 @@ namespace PrismDock
         }
 
         // ---------------------------------------------------------------- drag to reorder
-        bool dragTest;
-        /// dev: drag the 2nd icon 2.5 slots right, drop, then drag it back (no real input, order not saved)
-        void DragTest()
-        {
-            ShowDock();
-            // run off-screen so nothing appears over what the user is doing
-            Native.SetWindowPos(hwnd, IntPtr.Zero, (int)(Left * scale), 5000, 0, 0, 0x0001 | 0x0010 | 0x0004);
-            var list = DockIcons().ToList();
-            if (list.Count < 4) return;
-            dragTest = true;
-            DumpOrder("start");
-            var v = list[1];
-            double w = v.ActualWidth, sx = SlotX(v) + w / 2;
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            int phase = 0;
-            var t = new DispatcherTimer(DispatcherPriority.Input) { Interval = TimeSpan.FromMilliseconds(15) };
-            t.Tick += (o, e) =>
-            {
-                double s = sw.Elapsed.TotalSeconds;
-                if (phase == 0) { dragV = v; dragStart = new Point(sx, 10); BeginDrag(dragStart); phase = 1; }
-                else if (phase == 1) { DragTo(new Point(sx + w * 2.5 * Math.Min(1, s / 1.2), 10)); if (s > 1.0 && s < 1.03) DumpOrder("dragging"); if (s > 2.2) { EndDrag(); phase = 2; Diag.Hit("dropped"); } }
-                else if (phase == 2 && s > 3.3 && s < 3.33) DumpOrder("after-drop");
-                else if (phase == 2 && s > 3.5) { dragV = v; dragStart = new Point(SlotX(v) + w / 2, 10); BeginDrag(dragStart); phase = 3; }
-                else if (phase == 3) { double k = Math.Min(1, (s - 3.5) / 1.0); DragTo(new Point(dragStart.X - w * 2 * k, 10)); if (s > 5) { EndDrag(); phase = 4; } }
-                else if (phase == 4 && s > 6.3) { DumpOrder("end"); t.Stop(); dragTest = false; Diag.Hit("dragTestEnd"); }
-            };
-            t.Start();
-        }
-
-        void DumpOrder(string tag)
-        {
-            var sb = new System.Text.StringBuilder(tag + ":");
-            foreach (var i in DockIcons()) sb.Append("  " + i.App.Name + "@" + Math.Round(SlotX(i)) + (Math.Abs(i.DragT.X) > 0.5 ? "+" + Math.Round(i.DragT.X) : "") + (Panel.GetZIndex(i) > 0 ? "^" : ""));
-            sb.Append("   | apps: " + string.Join(", ", apps.Select(a => a.Name)));
-            try { File.AppendAllText(Path.Combine(Settings.Dir, "dragtest.log"), sb + Environment.NewLine); } catch { }
-        }
 
         DockIcon dragV; bool dragging, dragMoved; Point dragStart; double grabOffset; DateTime dragEnded;
 
@@ -959,7 +951,7 @@ namespace PrismDock
             grabOffset = dragStart.X - SlotX(dragV);
             foreach (var i in DockIcons()) if (i != dragV) i.SetMagnify(1);
             dragV.SetDragging(true);
-            if (!dragTest) dragV.CaptureMouse();
+            dragV.CaptureMouse();
             RestartAutoHide();
         }
 
@@ -1007,12 +999,13 @@ namespace PrismDock
             v.SetDragging(false);
             v.Settle();
             dragEnded = DateTime.Now;
-            if (dragMoved && !dragTest)
+            if (dragMoved)
             {
                 // dropping an app somewhere pins it there; the pinned order is saved
                 if (!v.App.Pinned && v.App.Launch != null && !v.App.Launch.StartsWith("hwnd:")) v.App.Pinned = true;
                 App.S.Pinned = apps.Where(a => a.Pinned && a.Launch != null && !a.Removing).Select(a => a.Launch).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 App.S.Save();
+                App.PinsChanged(this);
             }
             RestartAutoHide();
         }
@@ -1026,7 +1019,11 @@ namespace PrismDock
             v.Disappear(() => { appsPanel.Children.Remove(v); v.Unregister(host); apps.Remove(a); });
         }
 
-        void ScheduleRefresh() { refreshTimer.Stop(); refreshTimer.Start(); }
+        void ScheduleRefresh()
+        {
+            refreshTimer.Stop(); refreshTimer.Start();
+            if (Primary) foreach (var d in App.Docks) if (!d.Primary) d.ScheduleRefresh();
+        }
 
         void Refresh()
         {
@@ -1058,6 +1055,7 @@ namespace PrismDock
             IntPtr fg = Native.GetForegroundWindow();
             foreach (var a in apps)
                 if (a.View != null && !a.Removing) a.View.UpdateState(a.Wins.Any(w => w.H == fg));
+            if (Primary) foreach (var d in App.Docks) if (!d.Primary) d.UpdateStates();
         }
 
         void OnAppClick(DockApp a)
@@ -1128,6 +1126,7 @@ namespace PrismDock
             a.Pinned = true;
             if (!App.S.Pinned.Contains(a.Launch)) App.S.Pinned.Add(a.Launch);
             App.S.Save();
+            App.PinsChanged(this);
         }
 
         void Unpin(DockApp a)
@@ -1136,6 +1135,7 @@ namespace PrismDock
             App.S.Pinned.Remove(a.Launch);
             App.S.Save();
             if (a.Wins.Count == 0) RemoveApp(a);
+            App.PinsChanged(this);
         }
 
         /// Pins a file / shortcut / exe / shell:AppsFolder item and animates it in.
@@ -1145,6 +1145,7 @@ namespace PrismDock
             var a = DockApp.FromPath(f);
             App.S.Pinned.Add(f);
             App.S.Save();
+            App.PinsChanged(this);
             var running = apps.FirstOrDefault(x => !x.Pinned && !x.Removing && a.Exe != null && x.Exe == a.Exe);
             if (running != null) { running.Pinned = true; running.Launch = f; if (running.View != null) running.View.Bounce(); return; }
             int idx = apps.FindLastIndex(x => x.Pinned) + 1;
@@ -1167,7 +1168,7 @@ namespace PrismDock
         {
             if (ev == 0x8002)
             {
-                if (idObj == 0 && App.S.HideTaskbar && Taskbar.IsTray(h))
+                if (idObj == 0 && App.S.HideTaskbar && Taskbar.IsTray(h) && Taskbar.MayHide())
                 {
                     Native.ShowWindow(h, Native.SW_HIDE);
                     if ((DateTime.Now - lastReshowLog).TotalSeconds > 1) { lastReshowLog = DateTime.Now; EventLog.Write("taskbar re-shown by explorer -> hidden"); }
@@ -1193,7 +1194,7 @@ namespace PrismDock
         {
             if (fsPoll != null) return;
             fsPoll = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
-            fsPoll.Tick += (s, e) => FsVote(Native.GetForegroundWindow());
+            fsPoll.Tick += (s, e) => { IntPtr fg = Native.GetForegroundWindow(); FsVote(fg); CheckWindowsStart(fg); };
             fsPoll.Start();
         }
 
@@ -1206,6 +1207,20 @@ namespace PrismDock
             if (tray == IntPtr.Zero) return;
             uint pid; Native.GetWindowThreadProcessId(tray, out pid);
             hookShow = Native.SetWinEventHook(0x8002, 0x8002, IntPtr.Zero, winProc, pid, 0, 0);
+        }
+
+        IntPtr lastStartCheck;
+        /// Windows' own Start / search in front while our Win menu is on = the key hook was bypassed
+        void CheckWindowsStart(IntPtr fg)
+        {
+            if (fg == lastStartCheck) return;
+            lastStartCheck = fg;
+            if (!App.S.WinKeyMenu || fg == IntPtr.Zero || Native.GetClass(fg) != "Windows.UI.Core.CoreWindow") return;
+            uint pid; Native.GetWindowThreadProcessId(fg, out pid);
+            string exe = System.IO.Path.GetFileName(Native.GetProcessPath(pid) ?? "");
+            if (exe.Equals("StartMenuExperienceHost.exe", StringComparison.OrdinalIgnoreCase) || exe.Equals("SearchHost.exe", StringComparison.OrdinalIgnoreCase)
+                || exe.Equals("SearchApp.exe", StringComparison.OrdinalIgnoreCase) || exe.Equals("ShellExperienceHost.exe", StringComparison.OrdinalIgnoreCase))
+                WinKeyHook.Bypassed();
         }
 
         void ScheduleFsCheck()
@@ -1221,16 +1236,19 @@ namespace PrismDock
         IntPtr WndProc(IntPtr h, int msg, IntPtr w, IntPtr l, ref bool handled)
         {
             if (msg == 0x21) { handled = true; return (IntPtr)3; } // WM_MOUSEACTIVATE -> MA_NOACTIVATE
-            if (msg == (int)WinKeyHook.TapMsg && WinKeyHook.TapMsg != 0) { OpenStart(true); handled = true; return IntPtr.Zero; } // Win tapped (key hook helper)
-            if (msg == 0x312 && w.ToInt32() == HotkeyId) { OpenSearch(); handled = true; return IntPtr.Zero; } // WM_HOTKEY
+            if (msg == (int)WinKeyHook.TapMsg && WinKeyHook.TapMsg != 0) { WinKeyHook.LastTap = DateTime.Now; App.DockAtCursor().OpenStart(true); handled = true; return IntPtr.Zero; } // Win tapped (key hook helper)
+            if (msg == 0x312 && w.ToInt32() == HotkeyId) { App.DockAtCursor().OpenSearch(); handled = true; return IntPtr.Zero; } // WM_HOTKEY
             if (msg == (int)shellMsg && shellMsg != 0)
             {
                 int code = w.ToInt32();
                 Diag.Hit("shell" + code);
                 if (code == 0x8006) // HSHELL_FLASH
                 {
-                    var app = apps.FirstOrDefault(a => a.Wins.Any(x => x.H == l));
-                    if (app != null && app.View != null) app.View.Flash();
+                    foreach (var d in App.Docks)
+                    {
+                        var app = d.apps.FirstOrDefault(a => a.Wins.Any(x => x.H == l));
+                        if (app != null && app.View != null) app.View.Flash();
+                    }
                 }
                 else if (code == 4 || code == 0x8004) { UpdateStates(); ScheduleRefresh(); }
                 else if (code == 6) // HSHELL_REDRAW: title changed

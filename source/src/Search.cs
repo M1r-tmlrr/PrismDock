@@ -344,11 +344,11 @@ namespace PrismDock
 
         public SearchWindow() : base(640, 470) { CenterOrigin = true; }
 
-        public void OpenCentered()
+        public void OpenCentered() { OpenCentered(new Rect(0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight)); }
+        public void OpenCentered(Rect m)
         {
             AppCatalog.Load(Dispatcher);
-            double sw = SystemParameters.PrimaryScreenWidth, sh = SystemParameters.PrimaryScreenHeight;
-            Place(Math.Round((sw - PW) / 2), Math.Round(sh * 0.17), false);
+            Place(Math.Round(m.X + (m.Width - PW) / 2), Math.Round(m.Y + m.Height * 0.17), false);
         }
 
         protected override UIElement Build()
@@ -410,7 +410,6 @@ namespace PrismDock
 
         protected override void Closed2() { if (cts != null) cts.Cancel(); if (debounce != null) debounce.Stop(); }
 
-        public void DebugQuery(string q) { Dispatcher.BeginInvoke(new Action(() => { box.Text = q; box.CaretIndex = q.Length; }), DispatcherPriority.Input); }
 
         // ------------------------------------------------------------ query
         void OnText()
@@ -581,7 +580,8 @@ namespace PrismDock
             if (r.Icon == null && r.IconPath != null)
             {
                 string p = r.IconPath;
-                Dispatcher.BeginInvoke(new Action(() => { r.Icon = Icons.ForPath(p, (int)(32 * scale)) ?? Icons.Letter(r.Name); img.Source = r.Icon; }), DispatcherPriority.Background);
+                int px = (int)(32 * scale); string nm = r.Name;
+                Icons.Async(Dispatcher, () => Icons.ForPath(p, px) ?? Icons.Letter(nm), i => { r.Icon = i; img.Source = i; });
             }
             var texts = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             var n = Ui.Text(r.Name, 14, FontWeights.SemiBold, Ui.Br(t.Fg)); n.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -748,7 +748,8 @@ namespace PrismDock
             b.Loaded += (s, e) =>
             {
                 if (loaded) return; loaded = true;
-                Dispatcher.BeginInvoke(new Action(() => img.Source = Icons.ForPath(a.Launch, (int)(32 * scale)) ?? Icons.Letter(a.Name)), DispatcherPriority.Background);
+                int px = (int)(32 * scale);
+                Icons.Async(Dispatcher, () => Icons.ForPath(a.Launch, px) ?? Icons.Letter(a.Name), i => img.Source = i);
             };
             return b;
         }

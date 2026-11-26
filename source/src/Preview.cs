@@ -100,9 +100,10 @@ namespace PrismDock
             // size + place: centred over the icon, kept on screen
             root.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double pw = Math.Ceiling(surf.DesiredSize.Width + Pad * 2), ph = Math.Ceiling(surf.DesiredSize.Height + Pad * 2);
-            double sw = SystemParameters.PrimaryScreenWidth;
+            var mb = Mon.BoundsAt(anchorX, top ? edgeY + 1 : edgeY - 1);
+            double sw = mb.Width;
             Width = pw; Height = ph;
-            Left = Math.Round(Ui.Clamp(anchorX - pw / 2, 4, sw - pw - 4));
+            Left = Math.Round(Ui.Clamp(anchorX - pw / 2, mb.Left + 4, mb.Right - pw - 4));
             Top = Math.Round(top ? edgeY + 2 : edgeY - ph - 2);
             host.Configure();
 
@@ -242,7 +243,8 @@ namespace PrismDock
             root.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             double w = Math.Ceiling(surf.DesiredSize.Width + Pad * 2);
             double cx = Left + Width / 2;
-            Width = w; Left = Math.Round(Ui.Clamp(cx - w / 2, 4, SystemParameters.PrimaryScreenWidth - w - 4));
+            var mb = Mon.BoundsAt(cx, Top + Height / 2);
+            Width = w; Left = Math.Round(Ui.Clamp(cx - w / 2, mb.Left + 4, mb.Right - w - 4));
             if (host != null) host.Configure();
         }
 

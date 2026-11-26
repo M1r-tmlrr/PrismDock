@@ -10,8 +10,10 @@ namespace PrismDock
     class App : Application
     {
         public static Settings S;
-        public static DockWindow Dock;
-        public static IslandWindow Island;
+        public static DockWindow Dock;                                   // primary monitor (owns hooks, island, taskbar)
+        public static readonly System.Collections.Generic.List<DockWindow> Docks = new System.Collections.Generic.List<DockWindow>();
+        public static IslandWindow Island;                                // primary monitor
+        public static readonly System.Collections.Generic.List<IslandWindow> Islands = new System.Collections.Generic.List<IslandWindow>();
         static Mutex mutex;
         static System.Windows.Forms.NotifyIcon tray;
         static bool cleaned;
@@ -37,49 +39,16 @@ namespace PrismDock
                 return;
             }
 
-            int si = Array.FindIndex(args, a => a == "--snapshot");
-            if (si >= 0 && si + 1 < args.Length)
-            {
-                string dir = args[si + 1]; Directory.CreateDirectory(dir);
-                Wallpaper.Load();
-                new Application();
-                AppCatalog.Load(System.Windows.Threading.Dispatcher.CurrentDispatcher);
-                var sw0 = DateTime.Now;
-                while (!AppCatalog.Ready && (DateTime.Now - sw0).TotalSeconds < 15)
-                {
-                    var fr = new System.Windows.Threading.DispatcherFrame();
-                    System.Windows.Threading.Dispatcher.CurrentDispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, new Action(() => fr.Continue = false));
-                    System.Windows.Threading.Dispatcher.PushFrame(fr); Thread.Sleep(30);
-                }
-                foreach (var th in Theme.All.Where(x => x.Id == "liquid" || (x.Id == "frost" && Environment.GetEnvironmentVariable("PRISM_SNAPQ") == null)))
-                {
-                    Theme.Cur = th;
-                    foreach (var q in (Environment.GetEnvironmentVariable("PRISM_SNAPQ") ?? "rocket").Split('|'))
-                    {
-                        var sw = new SearchWindow(); string qq = q;
-                        sw.Snapshot(Path.Combine(dir, th.Id + "_search_" + Search.Fold(q).Replace(' ', '_') + ".png"), () => sw.DebugQuery(qq));
-                    }
-                    var se = new SearchWindow(); se.Snapshot(Path.Combine(dir, th.Id + "_search_empty.png"), () => { });
-                    var pk = new AppPickerPanel(); pk.Snapshot(Path.Combine(dir, th.Id + "_picker.png"), () => { });
-                    new StartPanel().Snapshot(Path.Combine(dir, th.Id + "_start.png"));
-                    new TrayPanel().Snapshot(Path.Combine(dir, th.Id + "_tray.png"), () => Tray.Start(System.Windows.Threading.Dispatcher.CurrentDispatcher));
-                }
-                foreach (var th in Theme.All.Where(x => x.Id == "liquid" || x.Id == "frost" || x.Id == "aurora"))
-                {
-                    Theme.Cur = th;
-                    new CalendarPanel().Snapshot(Path.Combine(dir, th.Id + "_calendar.png"));
-                    new SystemPanel().Snapshot(Path.Combine(dir, th.Id + "_system.png"));
-                    new PomodoroPanel().Snapshot(Path.Combine(dir, th.Id + "_pomodoro.png"));
-                    new SettingsPanel().Snapshot(Path.Combine(dir, th.Id + "_settings.png"));
-                    new NotesPanel().Snapshot(Path.Combine(dir, th.Id + "_notes.png"));
-                    new KeyboardPanel().Snapshot(Path.Combine(dir, th.Id + "_keyboard.png"));
-                }
-                return;
-            }
-
             bool created;
             mutex = new Mutex(true, "PrismDock_SingleInstance_v1", out created);
-            if (!created) return;
+            if (!created)
+            {
+                // starting PrismDock again replaces the running one (also when it is stuck and can't be closed)
+                try { EventWaitHandle qe; if (EventWaitHandle.TryOpenExisting(QuitEventName, out qe)) { qe.Set(); qe.Dispose(); } } catch { }
+                try { if (!mutex.WaitOne(8000)) return; }
+                catch (AbandonedMutexException) { }
+            }
+            Watchdog.Start();
             S.AutoStart = S.AutoStart || AutoStart.RunKeyExists();   // exact state is checked in the background below
 
             var startClock = System.Diagnostics.Stopwatch.StartNew();
@@ -88,7 +57,15 @@ namespace PrismDock
             Microsoft.Win32.SystemEvents.UserPreferenceChanged += (s, e) =>
             {
                 if (e.Category != Microsoft.Win32.UserPreferenceCategory.Desktop || Dock == null) return;
-                Dock.Dispatcher.BeginInvoke(new Action(() => { if (!S.LiveGlass) Wallpaper.Load(); Dock.Rebuild(); Dock.RethemePanels(); }));
+                Dock.Dispatcher.BeginInvoke(new Action(() => { if (!S.LiveGlass || LiveCapture.TooSlow) Wallpaper.Load(); Dock.Rebuild(); Dock.RethemePanels(); }));
+            };
+            // weak GPU: screen copies too slow -> same look from the blurred wallpaper, no live capture
+            LiveCapture.SlowChanged += () =>
+            {
+                Wallpaper.Load();
+                foreach (var d in Docks.ToList()) d.Rebuild();
+                if (Dock != null) Dock.RethemePanels();
+                foreach (var i in Islands.ToList()) i.Retheme();
             };
 
             var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -101,6 +78,8 @@ namespace PrismDock
 
             Dock = new DockWindow();
             Dock.Show();
+            SyncMonitors();
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => Dock.Dispatcher.BeginInvoke(new Action(SyncMonitors), System.Windows.Threading.DispatcherPriority.Background);
             if (S.HideTaskbar) Taskbar.HideHard(S);   // off the UI thread, after the dock is on screen
             EventLog.Write("start  build " + EventLog.WindowsBuild + "  dock shown in " + startClock.ElapsedMilliseconds + " ms" +
                 "  (" + (int)(DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime).TotalMilliseconds + " ms since process start, uptime " + (Native.GetTickCount64() / 1000) + " s)");
@@ -143,18 +122,52 @@ namespace PrismDock
             try
             {
                 var ev = new EventWaitHandle(false, EventResetMode.AutoReset, QuitEventName);
-                var th = new Thread(() => { ev.WaitOne(); Dock.Dispatcher.BeginInvoke(new Action(Quit)); }) { IsBackground = true };
+                var th = new Thread(() =>
+                {
+                    ev.WaitOne();
+                    Dock.Dispatcher.BeginInvoke(new Action(Quit));
+                    // the UI thread may be stuck: give it 3 s, then clean up from here and leave anyway
+                    Thread.Sleep(3000);
+                    EventLog.Write("quit: UI did not respond, forced exit");
+                    EmergencyExit(0);
+                }) { IsBackground = true };
                 th.Start();
             }
             catch { }
         }
 
 
+        /// a dock on every monitor (when enabled); monitors that appear / disappear get / lose theirs
+        public static void SyncMonitors()
+        {
+            var screens = System.Windows.Forms.Screen.AllScreens;
+            // other monitors get only the island (no dock); the dock stays on the primary monitor
+            foreach (var d in Docks.ToList()) if (!d.Primary) d.Close();
+            bool want = S.Island && S.AllMonitors;
+            foreach (var i in Islands.ToList())
+                if (!i.Primary && (!want || !screens.Any(x => x.DeviceName == i.Device))) { i.Release(); i.Close(); Islands.Remove(i); }
+            if (want)
+                foreach (var scr in screens)
+                    if (!scr.Primary && !Islands.Any(i => i.Device == scr.DeviceName)) { var isl = new IslandWindow(scr); Islands.Add(isl); isl.Show(); }
+            foreach (var d in Docks.ToList()) d.Relayout();
+        }
+
+        public static void PinsChanged(DockWindow from)
+        {
+            foreach (var d in Docks.ToList()) if (d != from) d.ReloadPins();
+        }
+
+        /// the dock on the monitor under the mouse (Win key / Alt+Space open there)
+        public static DockWindow DockAtCursor()
+        {
+            string dev = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).DeviceName;
+            return Docks.FirstOrDefault(d => d.Device == dev) ?? Dock;
+        }
+
         static void SyncIsland()
         {
-            if (Environment.GetEnvironmentVariable("PRISM_DRAGTEST") != null) return;
-            if (S.Island && Island == null) { Island = new IslandWindow(); Island.Show(); }
-            else if (!S.Island && Island != null) { Island.Release(); Island.Close(); Island = null; }
+            if (S.Island && Island == null) { Island = new IslandWindow(); Islands.Add(Island); Island.Show(); }
+            else if (!S.Island && Island != null) { Island.Release(); Island.Close(); Islands.Remove(Island); Island = null; }
         }
 
         static string lastTheme; static bool lastLive = true; static int lastLight = -1, lastRefr = -1;
@@ -170,11 +183,12 @@ namespace PrismDock
             Theme.Cur = Theme.Get(S.Theme);
             SetAutoStart(S.AutoStart);
             if (S.HideTaskbar) Taskbar.HideHard(S); else Taskbar.Restore(S);
-            Dock.Rebuild();
+            foreach (var d in Docks.ToList()) d.Rebuild();
             if (themeChanged) Dock.RethemePanels();
             SyncIsland();
-            if (Island != null && themeChanged) Island.Retheme();
-            if (!S.Island || !S.AutoHide) Dock.ShowDock();
+            SyncMonitors();
+            if (themeChanged) foreach (var i in Islands.ToList()) i.Retheme();
+            if (!S.Island || !S.AutoHide) foreach (var d in Docks.ToList()) d.ShowDock();
         }
 
         static bool? autoApplied;
@@ -218,11 +232,20 @@ namespace PrismDock
         }
 
         static bool sessionEnding;
+
+        /// last-resort exit from a background thread: release the screen strips, give the taskbar back, go
+        public static void EmergencyExit(int code)
+        {
+            try { Taskbar.UnreserveAll(); } catch { }
+            try { if (S != null) Taskbar.Restore(S); } catch { }
+            try { if (tray != null) tray.Visible = false; } catch { }
+            Environment.Exit(code);
+        }
         static void Cleanup()
         {
             if (cleaned) return;
             cleaned = true;
-            try { if (Island != null) Island.Release(); } catch { }
+            try { foreach (var i in Islands.ToList()) i.Release(); } catch { }
             try { if (Dock != null) Dock.Shutdown(); } catch { }
             // on shutdown / sign-out keep the Windows taskbar hidden (auto-hide), so at the next login
             // PrismDock appears instead of the Windows taskbar. A normal quit restores it.

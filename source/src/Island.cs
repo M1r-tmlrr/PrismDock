@@ -35,8 +35,20 @@ namespace PrismDock
         static readonly CultureInfo Tr = new CultureInfo("tr-TR");
         const double WinW = 420;
 
-        public IslandWindow()
+        public readonly bool Primary;
+        string device;
+        Rect mon;
+        System.Drawing.Rectangle monPx;
+        public string Device { get { return device; } }
+
+        public IslandWindow() : this(null) { }
+
+        /// screen == null: the primary monitor's island
+        public IslandWindow(System.Windows.Forms.Screen screen)
         {
+            Primary = screen == null;
+            var scr = screen ?? System.Windows.Forms.Screen.PrimaryScreen;
+            device = scr.DeviceName; monPx = scr.Bounds; mon = Mon.Dip(scr.Bounds);
             WindowStyle = WindowStyle.None; AllowsTransparency = false; ResizeMode = ResizeMode.NoResize; ShowInTaskbar = false; Topmost = true;
             ShowActivated = false; Background = Brushes.Transparent; FontFamily = Ui.TextFont; Title = "PrismDock Island";
             Content = root;
@@ -50,6 +62,7 @@ namespace PrismDock
         void FindBand()
         {
             bandTop = 0; bandH = 36;
+            if (!Primary) return;
             try
             {
                 foreach (var p in Process.GetProcessesByName("yasb"))
@@ -134,7 +147,7 @@ namespace PrismDock
             surf.MouseRightButtonUp += (s, e) => { if (App.Dock != null) App.Dock.OpenSettings(); e.Handled = true; };
 
             Width = WinW; Height = bandH;
-            Left = Math.Round((SystemParameters.PrimaryScreenWidth - WinW) / 2); Top = bandTop;
+            Left = Math.Round(mon.X + (mon.Width - WinW) / 2); Top = mon.Y + bandTop;
             Tick();
         }
 
@@ -153,13 +166,13 @@ namespace PrismDock
                 return IntPtr.Zero;
             });
             Reserve();
-            host = new BackdropHost(this, true); // frosted: text under the island (e.g. YASB) must not show through
+            host = new BackdropHost(this, true) { Slow = !Primary }; // frosted: text under the island (e.g. YASB) must not show through
             surf.Attach(host);
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 host.Configure();
                 host.Start(); dropS.To(0);
-                if (App.Dock != null && App.Dock.FullscreenActive) SetHidden(true);
+                if (App.Dock != null && App.Dock.FullscreenOn(device)) SetHidden(true);
                 var t0 = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
                 t0.Tick += (o, e2) => { t0.Stop(); if (App.Dock != null) App.Dock.RefreshFocus(); };
                 t0.Start();
@@ -217,8 +230,8 @@ namespace PrismDock
         {
             if (hwnd == IntPtr.Zero) return;
             lastReserve = DateTime.Now;
-            Taskbar.Reserve(hwnd, true, (int)Math.Round((bandTop + bandH) * scale));
-            Native.SetWindowPos(hwnd, (IntPtr)(-1), (int)Math.Round(Left * scale), (int)Math.Round(bandTop * scale), (int)Math.Round(WinW * scale), (int)Math.Round(bandH * scale), 0x10);
+            Taskbar.Reserve(hwnd, true, (int)Math.Round((bandTop + bandH) * scale), monPx);
+            Native.SetWindowPos(hwnd, (IntPtr)(-1), (int)Math.Round(Left * scale), (int)Math.Round((mon.Y + bandTop) * scale), (int)Math.Round(WinW * scale), (int)Math.Round(bandH * scale), 0x10);
         }
 
         public void Release() { if (hwnd != IntPtr.Zero) Taskbar.Unreserve(hwnd); }

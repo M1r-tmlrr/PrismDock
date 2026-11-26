@@ -20,6 +20,7 @@ namespace PrismDock
         public bool SearchHotkey = true;
         public bool WinKeyMenu = true;
         public bool Island = true;
+        public bool AllMonitors = true;
         public bool AutoHide = true;
         public int GlassLight = 60;     // % of the original specular light / rim (100 = v2.0 look)
         public int Refraction = 100;    // % strength of lens bending
@@ -65,6 +66,7 @@ namespace PrismDock
                         case "searchhotkey": s.SearchHotkey = v == "1"; break;
                         case "winkey": s.WinKeyMenu = v == "1"; break;
                         case "island": s.Island = v == "1"; break;
+                        case "allmonitors": s.AllMonitors = v == "1"; break;
                         case "autohide": s.AutoHide = v == "1"; break;
                         case "glasslight": int.TryParse(v, out s.GlassLight); break;
                         case "refraction": int.TryParse(v, out s.Refraction); break;
@@ -100,6 +102,7 @@ namespace PrismDock
                 l.Add("searchhotkey=" + B(SearchHotkey));
                 l.Add("winkey=" + B(WinKeyMenu));
                 l.Add("island=" + B(Island));
+                l.Add("allmonitors=" + B(AllMonitors));
                 l.Add("autohide=" + B(AutoHide));
                 l.Add("glasslight=" + GlassLight);
                 l.Add("refraction=" + Refraction);

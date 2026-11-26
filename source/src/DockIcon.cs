@@ -49,6 +49,14 @@ namespace PrismDock
             return Path.GetFileNameWithoutExtension(exe);
         }
 
+        /// the icon if it is already in the cache (theme change, rebuild): shown instantly, no worker round-trip
+        public ImageSource CachedIcon()
+        {
+            var i = Icons.TryCached(Launch, 96);
+            if (i == null && Exe != null && !Exe.StartsWith("hwnd:")) i = Icons.TryCached(Exe, 96);
+            return i;
+        }
+
         public ImageSource Icon()
         {
             ImageSource i = null;
@@ -126,10 +134,11 @@ namespace PrismDock
                 spec.Background = Grad(Color.FromArgb(150, 255, 255, 255), Color.FromArgb(0, 255, 255, 255));
             }
             var rb = new LinearGradientBrush { StartPoint = new Point(0.2, 0), EndPoint = new Point(0.8, 1) };
-            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(40, 185), 255, 255, 255), 0));
-            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(15, 25), 255, 255, 255), 0.45));
-            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(10, 20), 255, 255, 255), 0.65));
-            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(25, 125), 255, 255, 255), 1));
+            Color rc = Color.FromRgb(t.Rim1.R, t.Rim1.G, t.Rim1.B), rc2 = Color.FromRgb(t.Rim2.R, t.Rim2.G, t.Rim2.B);
+            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(40, 185), rc.R, rc.G, rc.B), 0));
+            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(15, 25), rc2.R, rc2.G, rc2.B), 0.45));
+            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(10, 20), rc2.R, rc2.G, rc2.B), 0.65));
+            rb.GradientStops.Add(new GradientStop(Color.FromArgb(a2(25, 125), rc.R, rc.G, rc.B), 1));
             rb.Freeze();
             rim.BorderBrush = rb;
             shade.BorderBrush = Grad(Color.FromArgb(25, 0, 0, 0), Color.FromArgb(70, 0, 0, 0));
@@ -137,11 +146,23 @@ namespace PrismDock
             glowBrush = new SolidColorBrush(t.Dark ? Color.FromArgb(50, 255, 255, 255) : Color.FromArgb(40, 0, 0, 0));
             glow = new Border { CornerRadius = new CornerRadius(r), Background = glowBrush, Opacity = 0 };
             img = new System.Windows.Controls.Image { Width = Math.Round(iconSize * 0.66), Height = Math.Round(iconSize * 0.66) };
-            Dispatcher.BeginInvoke(new Action(() => img.Source = app.Icon()), System.Windows.Threading.DispatcherPriority.Background);
+            var cached = app.CachedIcon();
+            if (cached != null) img.Source = cached;
+            else
+            {
+                Icons.Async(Dispatcher, app.Icon, i => img.Source = i);
+                // never leave a tile empty: if the shell is slow, show the letter icon until the real one arrives
+                var fallback = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+                fallback.Tick += (s, e) => { fallback.Stop(); if (img.Source == null) img.Source = Icons.Letter(app.Name); };
+                fallback.Start();
+            }
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
 
             holder.Children.Add(shade);
             holder.Children.Add(tileGlass);
+            // the theme's own colouring (Gece Yarısı blue, Aurora / Gün Batımı gradients, Buz Beyazı frost ...)
+            if (!t.Opaque) holder.Children.Add(new Border { CornerRadius = new CornerRadius(r), Background = Ui.Br(t.Overlay) });
+            holder.Children.Add(new Border { CornerRadius = new CornerRadius(r), Background = t.TintBrush() });
             holder.Children.Add(fill);
             holder.Children.Add(spec);
             holder.Children.Add(glow);

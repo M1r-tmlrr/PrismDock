@@ -41,13 +41,39 @@ namespace PrismDock
                 s.Save();
             }
             SetState(ABS_AUTOHIDE | ABS_ALWAYSONTOP);
+            graceUntil = Environment.TickCount + 8000;   // explorer re-shows it a few times right after: that's normal
             ForEachTray(h => Native.ShowWindow(h, Native.SW_HIDE));
         }
 
         /// Re-hides if explorer brought it back. Cheap check.
         public static void Enforce()
         {
-            ForEachTray(h => { if (Native.IsWindowVisible(h)) { Native.ShowWindow(h, Native.SW_HIDE); EventLog.Write("taskbar re-hidden"); } });
+            ForEachTray(h => { if (Native.IsWindowVisible(h) && MayHide()) { Native.ShowWindow(h, Native.SW_HIDE); EventLog.Write("taskbar re-hidden"); } });
+        }
+
+        static readonly System.Collections.Generic.Queue<long> reshows = new System.Collections.Generic.Queue<long>();
+        static long backoffUntil, lastCounted;
+        static volatile int graceUntil;
+        /// Explorer (Windows 11 above all) can re-show its taskbar again and again. Fighting every time makes explorer
+        /// re-layout the taskbar in a loop, which slows the whole desktop down. More than 8 separate re-shows in 10 s (outside the first seconds after hiding):
+        /// stop hiding for a minute (the taskbar stays in auto-hide, so it only slides in at the screen edge).
+        public static bool MayHide()
+        {
+            lock (reshows)
+            {
+                long now = Environment.TickCount;
+                if (now < graceUntil) return true;
+                if (now < backoffUntil) return false;
+                if (now - lastCounted < 1000) return true;   // one burst = one re-show
+                lastCounted = now;
+                reshows.Enqueue(now);
+                while (reshows.Count > 0 && now - reshows.Peek() > 10000) reshows.Dequeue();
+                if (reshows.Count <= 8) return true;
+                reshows.Clear();
+                backoffUntil = now + 60000;
+                EventLog.Write("taskbar: explorer keeps re-showing it -> not fighting for 60 s");
+                return false;
+            }
         }
 
         /// Windows 11's explorer re-shows the taskbar shortly after its auto-hide state changes:
@@ -85,7 +111,10 @@ namespace PrismDock
         }
 
         /// Reserve a strip at screen edge (physical pixels).
-        public static void Reserve(IntPtr hwnd, bool top, int heightPx)
+        public static void Reserve(IntPtr hwnd, bool top, int heightPx) { Reserve(hwnd, top, heightPx, null); }
+
+        /// area: the monitor (physical px) the strip belongs to; null = primary
+        public static void Reserve(IntPtr hwnd, bool top, int heightPx, System.Drawing.Rectangle? area)
         {
             var d = new Native.APPBARDATA(); d.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(d); d.hWnd = hwnd;
             if (!appbars.Contains(hwnd))
@@ -94,18 +123,30 @@ namespace PrismDock
                 Native.SHAppBarMessage(ABM_NEW, ref d);
                 appbars.Add(hwnd);
             }
-            int sw = Native.GetSystemMetrics(0), sh = Native.GetSystemMetrics(1);
-            // same strip as last time: nothing to negotiate (avoids appbar ping-pong between our two bars)
-            string key = top + ":" + heightPx + ":" + sw + "x" + sh;
+            var m = area ?? new System.Drawing.Rectangle(0, 0, Native.GetSystemMetrics(0), Native.GetSystemMetrics(1));
+            // same strip as last time: nothing to negotiate (avoids appbar ping-pong between our bars)
+            string key = top + ":" + heightPx + ":" + m;
             string prev;
             if (lastPos.TryGetValue(hwnd, out prev) && prev == key) return;
             lastPos[hwnd] = key;
             d.uEdge = top ? 1u : 3u;
-            d.rc.Left = 0; d.rc.Right = sw;
-            if (top) { d.rc.Top = 0; d.rc.Bottom = heightPx; } else { d.rc.Top = sh - heightPx; d.rc.Bottom = sh; }
+            d.rc.Left = m.Left; d.rc.Right = m.Right;
+            if (top) { d.rc.Top = m.Top; d.rc.Bottom = m.Top + heightPx; } else { d.rc.Top = m.Bottom - heightPx; d.rc.Bottom = m.Bottom; }
             Native.SHAppBarMessage(ABM_QUERYPOS, ref d);
             if (top) d.rc.Bottom = d.rc.Top + heightPx; else d.rc.Top = d.rc.Bottom - heightPx;
             Native.SHAppBarMessage(ABM_SETPOS, ref d);
+        }
+
+        /// remove every strip we reserved (safe from any thread; used when the UI thread is stuck)
+        public static void UnreserveAll()
+        {
+            IntPtr[] all;
+            lock (appbars) { all = new IntPtr[appbars.Count]; appbars.CopyTo(all); }
+            foreach (var h in all)
+            {
+                var d = new Native.APPBARDATA(); d.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(d); d.hWnd = h;
+                Native.SHAppBarMessage(ABM_REMOVE, ref d);
+            }
         }
 
         public static void Unreserve(IntPtr hwnd)

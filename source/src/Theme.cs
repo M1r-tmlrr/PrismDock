@@ -48,13 +48,14 @@ namespace PrismDock
             });
             All.Add(new Theme
             {
-                Id = "clear", Name = "Kristal", AccentState = 3, AccentColor = Abgr(0x10, 0, 0, 0),
-                CaptureScale = 1.0, BlurMul = 0.0, RefractMul = 1.35, Chroma = 0.4, Saturation = 1.15,
-                Tint = new[] { C(0.0, 0, 0, 0) },
-                FillTop = C(0.12, 255, 255, 255), FillBottom = C(0.02, 255, 255, 255),
-                Rim1 = C(0.55, 255, 255, 255), Rim2 = C(0.12, 255, 255, 255), Sheen = C(0.16, 255, 255, 255),
-                Fg = Colors.White, Sub = C(0.72, 255, 255, 255), Hover = C(0.16, 255, 255, 255), Accent = Colors.White,
-                PanelExtra = C(0.35, 0, 0, 0)
+                // soft mocha / rosy taupe / cream (#3B322D #766A64 #9E8D84 #CAB3A7 #D9D1C7 #F8F8EC)
+                Id = "latte", Name = "Latte", AccentState = 4, AccentColor = Abgr(0x78, 0x3B, 0x32, 0x2D),
+                CaptureScale = 0.34, BlurMul = 1.0, RefractMul = 0.7, Chroma = 0.08, Saturation = 1.05,
+                Tint = new[] { C(0.30, 0x76, 0x6A, 0x64), C(0.26, 0x9E, 0x8D, 0x84), C(0.24, 0xCA, 0xB3, 0xA7) },
+                FillTop = C(0.16, 0xF8, 0xF8, 0xEC), FillBottom = C(0.03, 0xD9, 0xD1, 0xC7),
+                Rim1 = C(0.65, 0xCA, 0xB3, 0xA7), Rim2 = C(0.14, 0xD9, 0xD1, 0xC7), Sheen = C(0.14, 0xF8, 0xF8, 0xEC),
+                Fg = Color.FromRgb(0xF8, 0xF8, 0xEC), Sub = C(0.75, 0xD9, 0xD1, 0xC7), Hover = C(0.16, 0xCA, 0xB3, 0xA7),
+                Accent = Color.FromRgb(0xCA, 0xB3, 0xA7), PanelExtra = C(0.20, 0x3B, 0x32, 0x2D)
             });
             All.Add(new Theme
             {
@@ -137,10 +138,8 @@ namespace PrismDock
     {
         public static void Apply(IntPtr hwnd, Theme t)
         {
-            string mode = Environment.GetEnvironmentVariable("PRISM_GLASS") ?? "";
-            if (!mode.Contains("noext")) { var m = new Native.MARGINS { L = -1, R = -1, T = -1, B = -1 }; Native.DwmExtendFrameIntoClientArea(hwnd, ref m); }
-            int st = t.AccentState; if (mode.Contains("blur") && st == 4) st = 3;
-            var acc = new Native.AccentPolicy { AccentState = st, AccentFlags = 2, GradientColor = t.AccentColor };
+            var m = new Native.MARGINS { L = -1, R = -1, T = -1, B = -1 }; Native.DwmExtendFrameIntoClientArea(hwnd, ref m);
+            var acc = new Native.AccentPolicy { AccentState = t.AccentState, AccentFlags = 2, GradientColor = t.AccentColor };
             int size = System.Runtime.InteropServices.Marshal.SizeOf(acc);
             IntPtr p = System.Runtime.InteropServices.Marshal.AllocHGlobal(size);
             try
@@ -213,9 +212,7 @@ namespace PrismDock
             int x2 = (int)Math.Round(r.Right * scale), y2 = (int)Math.Round(r.Bottom * scale);
             int d = (int)Math.Round(radius * 2 * scale);
             IntPtr rgn = d > 1 ? Native.CreateRoundRectRgn(x1, y1, x2 + 1, y2 + 1, d, d) : Native.CreateRectRgn(x1, y1, x2, y2);
-            int ok = Native.SetWindowRgn(hwnd, rgn, true); // system owns rgn afterwards
-            if (Environment.GetEnvironmentVariable("PRISM_DEBUG") != null)
-                System.IO.File.AppendAllText(System.IO.Path.Combine(Settings.Dir, "debug.log"), DateTime.Now.ToString("HH:mm:ss.fff") + " rgn " + hwnd + " " + x1 + "," + y1 + "," + x2 + "," + y2 + " d=" + d + " ok=" + ok + Environment.NewLine);
+            Native.SetWindowRgn(hwnd, rgn, true); // system owns rgn afterwards
         }
     }
 }

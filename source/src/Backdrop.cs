@@ -125,8 +125,9 @@ float4 main(float2 uv : TEXCOORD) : COLOR
     {
         readonly IntPtr owner;
         readonly Dispatcher disp;
-        readonly Action tickAction;
-        internal volatile bool pending;
+        readonly Action applyAction;
+        readonly object capLock = new object();   // DIB / buffers are touched by the pacer thread and the UI thread
+        IntPtr pendingBuf; volatile bool uiPending; static bool affinityWarned;
         internal long due;
         internal volatile int period = 20;
         bool running;
@@ -144,10 +145,8 @@ float4 main(float2 uv : TEXCOORD) : COLOR
         {
             this.owner = owner;
             disp = Dispatcher.CurrentDispatcher;
-            tickAction = () => { try { Tick(); } finally { pending = false; } };
+            applyAction = Apply;
         }
-
-        internal void Post() { disp.BeginInvoke(DispatcherPriority.Render, tickAction); }
 
         public bool Running { get { return running; } }
         public bool Suspended;
@@ -161,14 +160,7 @@ float4 main(float2 uv : TEXCOORD) : COLOR
             ScreenPx = new Rect(r.X, r.Y, r.Width, r.Height);
             if (w != bw || h != bh || Bitmap == null)
             {
-                Free();
-                bw = w; bh = h;
-                sdc = Native.GetDC(IntPtr.Zero);
-                mdc = Native.CreateCompatibleDC(sdc);
-                var bi = new Native.BITMAPINFOHEADER { biSize = 40, biWidth = bw, biHeight = -bh, biPlanes = 1, biBitCount = 32 };
-                dib = Native.CreateDIBSection(sdc, ref bi, 0, out bits, IntPtr.Zero, 0);
-                oldBmp = Native.SelectObject(mdc, dib);
-                Native.SetStretchBltMode(mdc, 4); // HALFTONE: proper box filtering when downsampling
+                lock (capLock) { Free(); bw = w; bh = h; Alloc(); }
                 Bitmap = new WriteableBitmap(bw, bh, 96, 96, PixelFormats.Bgr32, null);
                 lastSum = 0;
                 Grab(true);
@@ -177,7 +169,22 @@ float4 main(float2 uv : TEXCOORD) : COLOR
             else Grab(true);
         }
 
-        const int ActiveMs = 20, StillMs = 33;   // 50 fps while the background moves, 30 fps when still
+        void Alloc()
+        {
+            {
+                sdc = Native.GetDC(IntPtr.Zero);
+                mdc = Native.CreateCompatibleDC(sdc);
+                var bi = new Native.BITMAPINFOHEADER { biSize = 40, biWidth = bw, biHeight = -bh, biPlanes = 1, biBitCount = 32 };
+                dib = Native.CreateDIBSection(sdc, ref bi, 0, out bits, IntPtr.Zero, 0);
+                oldBmp = Native.SelectObject(mdc, dib);
+                Native.SetStretchBltMode(mdc, 4); // HALFTONE: proper box filtering when downsampling
+                pendingBuf = System.Runtime.InteropServices.Marshal.AllocHGlobal(bw * bh * 4);
+            }
+        }
+
+        int ActiveMs = 20, StillMs = 33;   // 50 fps while the background moves, 30 fps when still
+        /// docks on extra monitors: 30 fps moving / 10 fps still keeps them live at a fraction of the cost
+        public void SetRates(int activeMs, int stillMs) { ActiveMs = activeMs; StillMs = stillMs; period = activeMs; }
 
         public void Start()
         {
@@ -189,31 +196,103 @@ float4 main(float2 uv : TEXCOORD) : COLOR
         public void Stop() { if (!running) return; running = false; Pacer.Remove(this); }
         public void Kick() { still = 0; period = ActiveMs; }
 
-        void Tick()
+        /// Runs on the pacer thread: screen copy, change check and staging happen here, off the UI thread.
+        /// The UI thread only gets work when the picture really changed (one memcpy + render).
+        internal void Capture()
         {
             if (!running) return;
-            if (Suspended || !Native.IsWindowVisible(owner)) { Diag.Hit("tickHidden"); return; }
-            bool changed = Grab(false);
-            if (changed) { period = ActiveMs; still = 0; }
+            if (Suspended || !Native.IsWindowVisible(owner)) return;
+            bool changed = false;
+            lock (capLock)
+            {
+                if (mdc == IntPtr.Zero || pendingBuf == IntPtr.Zero) return;
+                Blit();
+                uint sum = Checksum();
+                if (sum != lastSum)
+                {
+                    lastSum = sum;
+                    Native.CopyMemory(pendingBuf, bits, (IntPtr)(bw * bh * 4));
+                    changed = true;
+                }
+            }
+            if (changed)
+            {
+                period = ActiveMs; still = 0;
+                if (!uiPending) { uiPending = true; disp.BeginInvoke(DispatcherPriority.Render, applyAction); }
+            }
             else if (++still >= 6) period = StillMs;
         }
 
-        bool Grab(bool force)
+        /// Windows 11: switching the capture exclusion on and off makes DWM rebuild the window's redirection every
+        /// frame, which drags other apps (Settings, Clock, Calendar ...) down to a few fps. There it stays on for good
+        /// (the dock then doesn't appear in screenshots); Windows 10 keeps the cheap per-frame toggle.
+        static readonly bool stickyAffinity = EventLog.WindowsBuild >= 22000;
+        bool affinityOn;
+
+        // how long one screen copy takes (EMA, ms). A weak / software GPU (school PCs, VMs) makes every copy stall
+        // the compositor: slower than 12 ms -> 15/5 fps, slower than 25 ms -> live glass off (blurred wallpaper).
+        double blitMs = -1; int blitN; int slowStage;
+        public static volatile bool TooSlow;
+        public static event Action SlowChanged;
+
+        void Blit()
         {
-            if (mdc == IntPtr.Zero || Bitmap == null) return false;
-            Diag.Hit("grab");
-            Native.SetWindowDisplayAffinity(owner, 0x11); // WDA_EXCLUDEFROMCAPTURE
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!stickyAffinity || !affinityOn)
+            {
+                bool ok = Native.SetWindowDisplayAffinity(owner, 0x11); // WDA_EXCLUDEFROMCAPTURE
+                if (!ok && !affinityWarned) { affinityWarned = true; EventLog.Write("capture: SetWindowDisplayAffinity failed"); }
+                affinityOn = ok;
+            }
             if (factor >= 0.999) Native.BitBlt(mdc, 0, 0, bw, bh, sdc, src.X, src.Y, 0x00CC0020);
             else Native.StretchBlt(mdc, 0, 0, bw, bh, sdc, src.X, src.Y, src.Width, src.Height, 0x00CC0020);
-            Native.SetWindowDisplayAffinity(owner, 0);
-            uint sum = Checksum();
-            if (!force && sum == lastSum) return false;
-            lastSum = sum;
-            Bitmap.Lock();
-            Native.CopyMemory(Bitmap.BackBuffer, bits, (IntPtr)(bw * bh * 4));
-            Bitmap.AddDirtyRect(new Int32Rect(0, 0, bw, bh));
-            Bitmap.Unlock();
-            return true;
+            if (!stickyAffinity) { Native.SetWindowDisplayAffinity(owner, 0); affinityOn = false; }
+            double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            blitMs = blitMs < 0 ? ms : blitMs * 0.95 + ms * 0.05;
+            if (++blitN < 60) return;   // judge after a couple of seconds
+            if (slowStage == 0 && blitMs > 12)
+            {
+                slowStage = 1; ActiveMs = 66; StillMs = 200; period = ActiveMs;
+                EventLog.Write("capture: screen copy slow (" + blitMs.ToString("0.0") + " ms) -> 15 fps");
+            }
+            else if (slowStage == 1 && blitN > 200 && blitMs > 25 && !TooSlow)
+            {
+                slowStage = 2; TooSlow = true;
+                EventLog.Write("capture: screen copy too slow (" + blitMs.ToString("0.0") + " ms) -> live glass off");
+                disp.BeginInvoke(new Action(() => { if (SlowChanged != null) SlowChanged(); }));
+            }
+        }
+
+        /// UI thread: newest staged frame -> WriteableBitmap
+        void Apply()
+        {
+            lock (capLock)
+            {
+                uiPending = false;
+                if (Bitmap == null || pendingBuf == IntPtr.Zero || Bitmap.PixelWidth != bw || Bitmap.PixelHeight != bh) return;
+                Bitmap.Lock();
+                Native.CopyMemory(Bitmap.BackBuffer, pendingBuf, (IntPtr)(bw * bh * 4));
+                Bitmap.AddDirtyRect(new Int32Rect(0, 0, bw, bh));
+                Bitmap.Unlock();
+            }
+        }
+
+        /// synchronous capture on the UI thread (first frame after start / resize)
+        bool Grab(bool force)
+        {
+            lock (capLock)
+            {
+                if (mdc == IntPtr.Zero || Bitmap == null) return false;
+                Blit();
+                uint sum = Checksum();
+                if (!force && sum == lastSum) return false;
+                lastSum = sum;
+                Bitmap.Lock();
+                Native.CopyMemory(Bitmap.BackBuffer, bits, (IntPtr)(bw * bh * 4));
+                Bitmap.AddDirtyRect(new Int32Rect(0, 0, bw, bh));
+                Bitmap.Unlock();
+                return true;
+            }
         }
 
         unsafe uint Checksum()
@@ -227,13 +306,14 @@ float4 main(float2 uv : TEXCOORD) : COLOR
 
         void Free()
         {
+            if (pendingBuf != IntPtr.Zero) { System.Runtime.InteropServices.Marshal.FreeHGlobal(pendingBuf); pendingBuf = IntPtr.Zero; }
             if (mdc != IntPtr.Zero) { Native.SelectObject(mdc, oldBmp); Native.DeleteDC(mdc); mdc = IntPtr.Zero; }
             if (dib != IntPtr.Zero) { Native.DeleteObject(dib); dib = IntPtr.Zero; }
             if (sdc != IntPtr.Zero) { Native.ReleaseDC(IntPtr.Zero, sdc); sdc = IntPtr.Zero; }
-            Bitmap = null; bw = bh = 0;
+            bw = bh = 0;
         }
 
-        public void Dispose() { Stop(); Free(); }
+        public void Dispose() { Stop(); lock (capLock) Free(); Bitmap = null; }
     }
 
     /// Precise frame pacing for the captures (WPF/USER timers are quantised to 15.6 ms, which caps at ~32 fps).
@@ -273,9 +353,11 @@ float4 main(float2 uv : TEXCOORD) : COLOR
 
         static void Loop()
         {
+            var due = new List<LiveCapture>();
             while (true)
             {
                 long wait;
+                due.Clear();
                 lock (gate)
                 {
                     long now = clock.ElapsedMilliseconds;
@@ -286,12 +368,13 @@ float4 main(float2 uv : TEXCOORD) : COLOR
                         {
                             c.due += c.period;
                             if (c.due <= now) c.due = now + c.period;   // fell behind: don't burst
-                            if (!c.pending) { c.pending = true; c.Post(); }
+                            due.Add(c);
                         }
                         wait = Math.Min(wait, c.due - now);
                     }
                     if (list.Count == 0) wait = -1;
                 }
+                foreach (var c in due) { try { c.Capture(); } catch { } }
                 if (wait < 0) wake.WaitOne();
                 else if (wait > 0) wake.WaitOne((int)wait);
             }
@@ -308,6 +391,7 @@ float4 main(float2 uv : TEXCOORD) : COLOR
         bool frosted;
         public ImageSource Image;
         public Rect ScreenPx;
+        public bool Slow;
         public bool IsLive { get { return live != null; } }
 
         public BackdropHost(Window w, bool frosted)
@@ -326,12 +410,13 @@ float4 main(float2 uv : TEXCOORD) : COLOR
         {
             var t = Theme.Cur;
             IntPtr h = new WindowInteropHelper(win).Handle;
-            bool wantLive = App.S.LiveGlass && !t.Opaque && h != IntPtr.Zero && GlassEffect.Create() != null;
+            bool wantLive = App.S.LiveGlass && !LiveCapture.TooSlow && !t.Opaque && h != IntPtr.Zero && GlassEffect.Create() != null;
             if (wantLive)
             {
                 if (live == null)
                 {
                     live = new LiveCapture(h);
+                    if (Slow) live.SetRates(33, 100);
                     live.Reallocated += () => { Image = live.Bitmap; ScreenPx = live.ScreenPx; RebindAll(); };
                 }
                 double sc = Glass.Scale(win);

@@ -20,7 +20,7 @@ namespace PrismDockSetup
 {
     static class Program
     {
-        public const string Version = "2.1.2";
+        public const string Version = "2.1.3";
 
         [STAThread]
         static int Main(string[] args)

@@ -68,8 +68,9 @@ namespace PrismDock
                 if (box.Text.Length == 0) return;
                 string q = box.Text; box.Text = "";
                 // first key opens the search window; anything typed before it has focus is appended there, never lost
-                if (!handedOff) { handedOff = true; App.Dock.OpenSearch(q); CloseAnimated(); }
-                else App.Dock.AppendSearch(q);
+                var dock = AnchorDock ?? App.Dock;
+                if (!handedOff) { handedOff = true; dock.OpenSearch(q); CloseAnimated(); }
+                else dock.AppendSearch(q);
             };
             sg.Children.Add(box);
             sp.Children.Add(sg);
@@ -128,15 +129,20 @@ namespace PrismDock
                 foreach (var p in App.S.Pinned.Take(12)) pinnedGrid.Children.Add(AppTile(DockApp.FromPath(p)));
                 if (pinnedGrid.Children.Count < 12) pinnedGrid.Children.Add(Tile("\uE71D", "Tümü", () => { CloseAnimated(); App.Dock.OpenAppPicker(); }));
             }
-            var rec = Recent(4);
-            string rs = string.Join("|", rec.Select(f => f.FullName + f.LastWriteTime.Ticks));
-            if (rs != recentSig)
+            // resolving .lnk targets touches the shell (may be slow on cloud files): worker thread
+            ShellWorker.Run(() =>
             {
-                recentSig = rs;
-                recentPanel.Children.Clear();
-                foreach (var f in rec) recentPanel.Children.Add(RecentRow(f));
-                if (rec.Count == 0) recentPanel.Children.Add(Ui.Text("Henüz yok", 12, FontWeights.Normal, Ui.Br(t.Sub)));
-            }
+                var rec = Recent(4);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    string rs = string.Join("|", rec.Select(f => f.FullName + f.LastWriteTime.Ticks));
+                    if (rs == recentSig) return;
+                    recentSig = rs;
+                    recentPanel.Children.Clear();
+                    foreach (var f in rec) recentPanel.Children.Add(RecentRow(f));
+                    if (rec.Count == 0) recentPanel.Children.Add(Ui.Text("Henüz yok", 12, FontWeights.Normal, Ui.Br(Theme.Cur.Sub)));
+                }));
+            });
         }
         protected override void Opened()
         {
@@ -162,7 +168,8 @@ namespace PrismDock
         {
             var t = Theme.Cur;
             var st = new StackPanel();
-            var img = new Image { Width = 30, Height = 30, Source = a.Icon(), Margin = new Thickness(0, 4, 0, 0) };
+            var img = new Image { Width = 30, Height = 30, Margin = new Thickness(0, 4, 0, 0) };
+            Icons.Async(Dispatcher, a.Icon, i => img.Source = i);
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
             st.Children.Add(img);
             var n = Ui.Text(a.Name, 10.5, FontWeights.Normal, Ui.Br(t.Fg)); n.HorizontalAlignment = HorizontalAlignment.Center; n.TextTrimming = TextTrimming.CharacterEllipsis; n.MaxWidth = 64; n.Margin = new Thickness(0, 5, 0, 0);
@@ -204,7 +211,9 @@ namespace PrismDock
             g.ColumnDefinitions.Add(new ColumnDefinition());
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             string target = Shortcut.Target(f.FullName);
-            var img = new Image { Width = 22, Height = 22, Source = Icons.ForPath(target, (int)(32 * scale)) };
+            var img = new Image { Width = 22, Height = 22 };
+            int px = (int)(32 * scale);
+            Icons.Async(Dispatcher, () => Icons.ForPath(target, px), i => img.Source = i);
             g.Children.Add(img);
             var n = Ui.Text(Path.GetFileName(target), 13, FontWeights.Normal, Ui.Br(t.Fg)); n.TextTrimming = TextTrimming.CharacterEllipsis;
             Grid.SetColumn(n, 1); g.Children.Add(n);
